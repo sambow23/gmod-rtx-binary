@@ -35,3 +35,5 @@
 *.vcxproj
 *.vcxproj.*
 *.sln
+/.vs
+/x86

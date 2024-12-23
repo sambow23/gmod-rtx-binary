@@ -19,7 +19,7 @@ CreateWorkspace({name = "RTX-Fixes-Binary", abi_compatible = false, path = ""})
 	--	IncludeSDKTier0()
 	--	IncludeSDKTier1()
 
-	CreateProject({serverside = false, source_path = "source", manual_files = true})
+	CreateProject({serverside = false, source_path = "source" })
 		IncludeLuaShared()
 		IncludeScanning()
 		IncludeDetouring()
