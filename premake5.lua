@@ -1,4 +1,4 @@
-PROJECT_GENERATOR_VERSION = 2
+PROJECT_GENERATOR_VERSION = 3 -- 3 is needed for 64 bit support
 
 newoption({
 	trigger = "gmcommon",

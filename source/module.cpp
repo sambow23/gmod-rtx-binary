@@ -1,4 +1,5 @@
 #include "GarrysMod/Lua/Interface.h"
+#include <remix.h>
 
 /*
 	require "HelloWorld"
@@ -17,11 +18,14 @@ LUA_FUNCTION( MyExampleFunction )
 }
 
 GMOD_MODULE_OPEN()
-{
+{ 
+	Msg("[RTX Remix Fixes 2] - Module loaded!\n"); 
 	LUA->PushSpecial( GarrysMod::Lua::SPECIAL_GLOB );
 	LUA->PushString( "TestFunction" );
 	LUA->PushCFunction( MyExampleFunction );
 	LUA->SetTable( -3 ); // `_G.TestFunction = MyExampleFunction`
+
+	remix::lib::loadRemixDllAndInitialize(L"d3d9.dll");
 
 	return 0;
 }
