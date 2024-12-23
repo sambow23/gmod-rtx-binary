@@ -1,0 +1,1 @@
+premake5.exe --os=windows --gmcommon=./garrysmod_common vs2022
