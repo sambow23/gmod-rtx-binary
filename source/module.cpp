@@ -1,22 +1,6 @@
 #include "GarrysMod/Lua/Interface.h"
 #include <remix.h>
 
-/*
-	require "HelloWorld"
-	print( TestFunction( 5, 17 ) )
-*/
-
-using namespace GarrysMod::Lua;
-
-LUA_FUNCTION( MyExampleFunction )
-{
-	double first_number = LUA->CheckNumber( 1 );
-	double second_number = LUA->CheckNumber( 2 );
-
-	LUA->PushNumber( first_number + second_number );
-	return 1;
-}
-
 #include "cdll_client_int.h"	//IVEngineClient
 #include "materialsystem/imaterialsystem.h"
 #include <shaderapi/ishaderapi.h>
@@ -27,14 +11,29 @@ extern IMaterialSystem* materials = NULL;
 extern IVEngineClient* engine = NULL;
 extern IShaderAPI* g_pShaderAPI = NULL;
 remix::Interface* g_remix = nullptr;
+remixapi_LightHandle g_scene_light = nullptr;
+
+/*
+	require "HelloWorld"
+	print( TestFunction( 5, 17 ) )
+*/
+
+using namespace GarrysMod::Lua;
+
+LUA_FUNCTION(RTXDrawLights)
+{ 
+	g_remix->DrawLightInstance(g_scene_light); 
+	return 1;
+}
 
 GMOD_MODULE_OPEN()
 { 
 	Msg("[RTX Remix Fixes 2] - Module loaded!\n"); 
-	LUA->PushSpecial( GarrysMod::Lua::SPECIAL_GLOB );
-	LUA->PushString( "TestFunction" );
-	LUA->PushCFunction( MyExampleFunction );
-	LUA->SetTable( -3 ); // `_G.TestFunction = MyExampleFunction`
+
+	LUA->PushSpecial( GarrysMod::Lua::SPECIAL_GLOB ); 
+		LUA->PushCFunction(RTXDrawLights);
+		LUA->SetField(-2, "RTXDrawLights"); // Set MyFirstFunction in lua to our C++ function
+	LUA->Pop();
 
 	Msg("[RTX Remix Fixes 2] - Loading engine\n");
 	if (!Sys_LoadInterface("engine", VENGINE_CLIENT_INTERFACE_VERSION, NULL, (void**)&engine))
@@ -75,13 +74,13 @@ GMOD_MODULE_OPEN()
 	// HOW do i get this thing
 	g_remix->dxvk_RegisterD3D9Device(m_pD3DDevice); //g_pShaderAPI->GetD3DDevice() or Dx9Device() somehow?
 
-	g_remix->SetConfigVariable("rtx.fallbackLightMode", "2");
+	//g_remix->SetConfigVariable("rtx.fallbackLightMode", "2");
 
 	auto sphereLight = remixapi_LightInfoSphereEXT{
 		REMIXAPI_STRUCT_TYPE_LIGHT_INFO_SPHERE_EXT,
 		nullptr,
-		{0,-1,0},
-		0.1f,
+		{0,0,0},
+		1024.0f,
 		false ,
 		{},
 	};
@@ -97,6 +96,8 @@ GMOD_MODULE_OPEN()
 	if (!lightHandle) {
 		LUA->ThrowError("[RTX Remix Fixes 2] - remix::CreateLight() failed"); 
 	}
+
+	g_scene_light = lightHandle.value();
 
 	return 0;
 }
