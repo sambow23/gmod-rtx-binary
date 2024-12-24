@@ -3,7 +3,6 @@ TOOL.Name = "RTX Light"
 TOOL.Command = nil
 TOOL.ConfigName = ""
 
--- Default settings
 TOOL.ClientConVar = {
     ["brightness"] = "100",
     ["size"] = "200",
@@ -24,16 +23,12 @@ if CLIENT then
     end
 end
 
--- Store light data
-TOOL.Lights = TOOL.Lights or {}
-
 function TOOL:LeftClick(trace)
     if CLIENT then return true end
 
     local ply = self:GetOwner()
     if not IsValid(ply) then return false end
 
-    -- Get position from trace
     local pos = trace.HitPos
     
     -- Get tool settings
@@ -43,25 +38,27 @@ function TOOL:LeftClick(trace)
     local g = self:GetClientNumber("g", 255)
     local b = self:GetClientNumber("b", 255)
 
-    -- Delay entity creation slightly to avoid effects conflict
-    timer.Simple(0.05, function()
-        -- Create an entity to represent the light position
-        local ent = ents.Create("base_rtx_light")
-        if not IsValid(ent) then return end
+    -- Create entity
+    local ent = ents.Create("base_rtx_light")
+    if not IsValid(ent) then return false end
 
-        ent:SetPos(pos)
-        ent:SetAngles(angle_zero)
-        ent:Spawn()
-        
-        -- Set the light properties
-        ent:SetRTXLight(brightness, size, r, g, b)
+    ent:SetPos(pos)
+    ent:SetAngles(angle_zero)
+    ent:Spawn()
+    
+    -- Set the light properties directly
+    ent:SetLightBrightness(brightness)
+    ent:SetLightSize(size)
+    ent:SetLightR(r)
+    ent:SetLightG(g)
+    ent:SetLightB(b)
 
-        -- Undo setup
-        undo.Create("RTX Light")
-            undo.AddEntity(ent)
-            undo.SetPlayer(ply)
-        undo.Finish()
-    end)
+    print("[RTX Light Tool] Created light with properties:", brightness, size, r, g, b)
+
+    undo.Create("RTX Light")
+        undo.AddEntity(ent)
+        undo.SetPlayer(ply)
+    undo.Finish()
 
     return true
 end
@@ -69,7 +66,6 @@ end
 function TOOL:RightClick(trace)
     if CLIENT then return true end
     
-    -- Remove RTX light if we click on one
     if IsValid(trace.Entity) and trace.Entity:GetClass() == "base_rtx_light" then
         trace.Entity:Remove()
         return true
@@ -83,18 +79,15 @@ function TOOL:Reload(trace)
     
     if CLIENT then return true end
 
-    -- Copy settings from existing light
     local ply = self:GetOwner()
     if not IsValid(ply) then return false end
 
-    local brightness, size, r, g, b = trace.Entity:GetRTXLightProperties()
-    
-    -- Update the client's tool settings
-    ply:ConCommand("rtx_light_brightness " .. brightness)
-    ply:ConCommand("rtx_light_size " .. size)
-    ply:ConCommand("rtx_light_r " .. r)
-    ply:ConCommand("rtx_light_g " .. g)
-    ply:ConCommand("rtx_light_b " .. b)
+    -- Copy settings from existing light
+    ply:ConCommand("rtx_light_brightness " .. trace.Entity:GetLightBrightness())
+    ply:ConCommand("rtx_light_size " .. trace.Entity:GetLightSize())
+    ply:ConCommand("rtx_light_r " .. trace.Entity:GetLightR())
+    ply:ConCommand("rtx_light_g " .. trace.Entity:GetLightG())
+    ply:ConCommand("rtx_light_b " .. trace.Entity:GetLightB())
 
     return true
 end
