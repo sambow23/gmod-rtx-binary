@@ -59,24 +59,19 @@ remixapi_LightHandle RTXLightManager::CreateLight(const LightProperties& props) 
         sphereLight.shaping_hasvalue = false;
         memset(&sphereLight.shaping_value, 0, sizeof(sphereLight.shaping_value));
 
-        LogMessage("Created sphere light with radius %f\n", sphereLight.radius);
-
         auto lightInfo = remixapi_LightInfo{};
         lightInfo.sType = REMIXAPI_STRUCT_TYPE_LIGHT_INFO;
         lightInfo.pNext = &sphereLight;
-        lightInfo.hash = 0x3;  // Use the same hash as the working version
+        lightInfo.hash = GenerateLightHash();  // Ensure unique hash for each light
         lightInfo.radiance = {
             props.r * props.brightness,
             props.g * props.brightness,
             props.b * props.brightness
         };
 
-        LogMessage("Creating light with radiance (%f, %f, %f)\n",
-            lightInfo.radiance.x, lightInfo.radiance.y, lightInfo.radiance.z);
-
         auto result = m_remix->CreateLight(lightInfo);
         if (!result) {
-            LogMessage("Remix CreateLight failed with status: %d\n", result.status());
+            LogMessage("Remix CreateLight failed\n");
             LeaveCriticalSection(&m_lightCS);
             return nullptr;
         }
@@ -87,9 +82,12 @@ remixapi_LightHandle RTXLightManager::CreateLight(const LightProperties& props) 
         managedLight.lastUpdateTime = GetTickCount64() / 1000.0f;
         managedLight.needsUpdate = false;
 
+        // Add to lights vector
         m_lights.push_back(managedLight);
         
-        LogMessage("Successfully created light handle: %p\n", managedLight.handle);
+        LogMessage("Successfully created light handle: %p (Total lights: %d)\n", 
+            managedLight.handle, m_lights.size());
+
         LeaveCriticalSection(&m_lightCS);
         return managedLight.handle;
     }
@@ -98,6 +96,12 @@ remixapi_LightHandle RTXLightManager::CreateLight(const LightProperties& props) 
         LeaveCriticalSection(&m_lightCS);
         return nullptr;
     }
+}
+
+// Add a method to generate unique hashes
+uint64_t RTXLightManager::GenerateLightHash() const {
+    static uint64_t counter = 0;
+    return (static_cast<uint64_t>(GetCurrentProcessId()) << 32) | (++counter);
 }
 
 bool RTXLightManager::UpdateLight(remixapi_LightHandle handle, const LightProperties& props) {
@@ -146,12 +150,19 @@ void RTXLightManager::DestroyLight(remixapi_LightHandle handle) {
 
     EnterCriticalSection(&m_lightCS);
     
-    auto it = std::find_if(m_lights.begin(), m_lights.end(),
-        [handle](const ManagedLight& light) { return light.handle == handle; });
+    try {
+        auto it = std::find_if(m_lights.begin(), m_lights.end(),
+            [handle](const ManagedLight& light) { return light.handle == handle; });
 
-    if (it != m_lights.end()) {
-        m_remix->DestroyLight(it->handle);
-        m_lights.erase(it);
+        if (it != m_lights.end()) {
+            LogMessage("Destroying light handle: %p\n", handle);
+            m_remix->DestroyLight(it->handle);
+            m_lights.erase(it);
+            LogMessage("Light destroyed, remaining lights: %d\n", m_lights.size());
+        }
+    }
+    catch (...) {
+        LogMessage("Exception in DestroyLight\n");
     }
 
     LeaveCriticalSection(&m_lightCS);
@@ -163,9 +174,23 @@ void RTXLightManager::DrawLights() {
     EnterCriticalSection(&m_lightCS);
     
     try {
+        // Only print debug info every few seconds and if the light count changed
+        static size_t lastLightCount = 0;
+        static float lastDebugTime = 0;
+        float currentTime = GetTickCount64() / 1000.0f;
+        
+        if (m_lights.size() != lastLightCount && currentTime - lastDebugTime > 2.0f) {
+            Msg("[RTX Light Manager] Drawing %d lights\n", m_lights.size());
+            lastLightCount = m_lights.size();
+            lastDebugTime = currentTime;
+        }
+
         for (const auto& light : m_lights) {
             if (light.handle) {
-                m_remix->DrawLightInstance(light.handle);
+                auto result = m_remix->DrawLightInstance(light.handle);
+                if (!result && currentTime - lastDebugTime > 2.0f) {
+                    Msg("[RTX Light Manager] Failed to draw light handle: %p\n", light.handle);
+                }
             }
         }
     }
@@ -197,11 +222,6 @@ remixapi_LightInfo RTXLightManager::CreateLightInfo(const remixapi_LightInfoSphe
         sphereLight.position.z * sphereLight.radius
     };
     return lightInfo;
-}
-
-uint64_t RTXLightManager::GenerateLightHash() const {
-    static uint64_t counter = 0;
-    return (static_cast<uint64_t>(GetCurrentProcessId()) << 32) | (++counter);
 }
 
 void RTXLightManager::LogMessage(const char* format, ...) {

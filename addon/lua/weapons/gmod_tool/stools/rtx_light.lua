@@ -11,30 +11,12 @@ TOOL.ClientConVar = {
     ["b"] = "255"
 }
 
-if CLIENT then
-    language.Add("tool.rtx_light.name", "RTX Light")
-    language.Add("tool.rtx_light.desc", "Create RTX-enabled lights")
-    language.Add("tool.rtx_light.0", "Left click to create a light. Right click to remove. Reload to copy settings.")
-
-    function TOOL.BuildCPanel(panel)
-        panel:NumSlider("Brightness", "rtx_light_brightness", 1, 1000, 0)
-        panel:NumSlider("Size", "rtx_light_size", 50, 1000, 0)
-        panel:ColorPicker("Light Color", "rtx_light_r", "rtx_light_g", "rtx_light_b")
-    end
-
-    -- Disable default tool effects
-    function TOOL:DrawToolScreen()
-        return false
-    end
-end
-
--- Disable default tool effects
-function TOOL:DoEffect()
-    return false
-end
-
 function TOOL:LeftClick(trace)
     if CLIENT then return true end
+
+    -- Validate trace
+    if not trace or not trace.Hit then return false end
+    if not trace.HitPos then return false end
 
     local ply = self:GetOwner()
     if not IsValid(ply) then return false end
@@ -52,6 +34,9 @@ function TOOL:LeftClick(trace)
     local r = math.Clamp(self:GetClientNumber("r", 255), 0, 255)
     local g = math.Clamp(self:GetClientNumber("g", 255), 0, 255)
     local b = math.Clamp(self:GetClientNumber("b", 255), 0, 255)
+
+    print(string.format("[RTX Light Tool] Creating light - Brightness: %f, Size: %f, Color: %d,%d,%d",
+        brightness, size, r, g, b))
 
     -- Create entity without effects
     local ent = ents.Create("base_rtx_light")
@@ -72,14 +57,28 @@ function TOOL:LeftClick(trace)
     ent:Spawn()
     ent:Activate()
 
-    -- Create undo
+    -- Create undo with custom callback
     undo.Create("RTX Light")
         undo.AddEntity(ent)
         undo.SetPlayer(ply)
         undo.SetCustomUndoText("Undone RTX Light")
+        undo.AddFunction(function()
+            if IsValid(ent) then
+                -- Ensure cleanup happens before entity removal
+                net.Start("RTXLight_Cleanup")
+                    net.WriteEntity(ent)
+                net.Broadcast()
+                -- Small delay to ensure cleanup message is processed
+                timer.Simple(0.1, function()
+                    if IsValid(ent) then
+                        ent:Remove()
+                    end
+                end)
+            end
+        end)
     undo.Finish()
 
-    -- Add to cleanup list
+    -- Add to cleanup
     cleanup.Add(ply, "rtx_lights", ent)
 
     return true
@@ -113,11 +112,18 @@ function TOOL:Reload(trace)
     return true
 end
 
--- Disable drawing effects
-function TOOL:Deploy()
-    return true
+if CLIENT then
+    language.Add("tool.rtx_light.name", "RTX Light")
+    language.Add("tool.rtx_light.desc", "Create RTX-enabled lights")
+    language.Add("tool.rtx_light.0", "Left click to create a light. Right click to remove. Reload to copy settings.")
+
+    function TOOL.BuildCPanel(panel)
+        panel:NumSlider("Brightness", "rtx_light_brightness", 1, 1000, 0)
+        panel:NumSlider("Size", "rtx_light_size", 50, 1000, 0)
+        panel:ColorPicker("Light Color", "rtx_light_r", "rtx_light_g", "rtx_light_b")
+    end
 end
 
-function TOOL:Holster()
-    return true
-end
+-- Disable default tool effects
+function TOOL:DrawToolScreen() return false end
+function TOOL:DoEffect() return false end

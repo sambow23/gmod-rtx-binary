@@ -139,8 +139,13 @@ LUA_FUNCTION(DestroyRTXLight) {
 
 LUA_FUNCTION(DrawRTXLights) { 
     try {
+        if (!g_remix) {
+            Msg("[RTX Remix Fixes] Cannot draw lights - Remix interface is null\n");
+            return 0;
+        }
+
         RTXLightManager::Instance().DrawLights();
-        return 1;
+        return 0;
     }
     catch (...) {
         Msg("[RTX Remix Fixes] Exception in DrawRTXLights\n");

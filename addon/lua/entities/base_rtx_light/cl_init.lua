@@ -14,7 +14,10 @@ end
 
 function ENT:CreateRTXLight()
     if self.rtxLightHandle then
-        pcall(function() DestroyRTXLight(self.rtxLightHandle) end)
+        pcall(function() 
+            DestroyRTXLight(self.rtxLightHandle)
+            print("[RTX Light] Destroyed existing light handle:", self.rtxLightHandle)
+        end)
         self.rtxLightHandle = nil
     end
 
@@ -45,6 +48,7 @@ function ENT:CreateRTXLight()
         self.rtxLightHandle = handle
         self.lastUpdatePos = pos
         self.lastUpdateTime = CurTime()
+        print("[RTX Light] Successfully created light with handle:", handle)
     else
         ErrorNoHalt("[RTX Light] Failed to create light: ", tostring(handle), "\n")
     end
@@ -97,13 +101,21 @@ end
 
 function ENT:OnRemove()
     if self.rtxLightHandle then
+        print("[RTX Light] Cleaning up light handle:", self.rtxLightHandle)
         pcall(function()
             DestroyRTXLight(self.rtxLightHandle)
-            print("[RTX Light] Destroyed light handle:", self.rtxLightHandle)
         end)
         self.rtxLightHandle = nil
     end
 end
+
+net.Receive("RTXLight_Cleanup", function()
+    local ent = net.ReadEntity()
+    if IsValid(ent) and ent.rtxLightHandle then
+        ent:OnRemove()
+    end
+end)
+
 
 -- Simple property menu
 function ENT:OpenPropertyMenu()
