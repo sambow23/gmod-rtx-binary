@@ -2,8 +2,9 @@ ENT.Type = "anim"
 ENT.Base = "base_gmodentity"
 ENT.PrintName = "RTX Light"
 ENT.Author = "Your Name"
-ENT.Spawnable = false
-ENT.AdminSpawnable = false
+ENT.Spawnable = true
+ENT.AdminSpawnable = true
+ENT.Category = "RTX"
 
 function ENT:SetupDataTables()
     self:NetworkVar("Float", 0, "LightBrightness")
