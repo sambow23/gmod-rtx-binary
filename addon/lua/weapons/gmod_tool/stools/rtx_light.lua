@@ -60,26 +60,27 @@ function TOOL:LeftClick(trace)
     ent:SetPos(pos)
     ent:SetAngles(angle_zero)
     
-    -- Set properties before spawning
-    ent:SetLightBrightness(brightness)
-    ent:SetLightSize(size)
-    ent:SetLightR(r)
-    ent:SetLightG(g)
-    ent:SetLightB(b)
-
-    -- Disable effects before spawning
-    ent:AddEffects(EF_NODRAW)
-    ent:SetNotSolid(true)
+    -- Set initial properties
+    ent.InitialProperties = {
+        brightness = brightness,
+        size = size,
+        r = r,
+        g = g,
+        b = b
+    }
     
     ent:Spawn()
+    ent:Activate()
 
-    -- Add cleanup registration
-    cleanup.Add(ply, "rtx_lights", ent)
-    
+    -- Create undo
     undo.Create("RTX Light")
         undo.AddEntity(ent)
         undo.SetPlayer(ply)
+        undo.SetCustomUndoText("Undone RTX Light")
     undo.Finish()
+
+    -- Add to cleanup list
+    cleanup.Add(ply, "rtx_lights", ent)
 
     return true
 end

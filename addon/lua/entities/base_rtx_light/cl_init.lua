@@ -4,7 +4,7 @@ function ENT:Initialize()
     self:SetNoDraw(true)
     self:DrawShadow(false)
     
-    -- Delay light creation slightly to ensure entity is fully initialized
+    -- Delay light creation to ensure networked values are received
     timer.Simple(0.1, function()
         if IsValid(self) then
             self:CreateRTXLight()
@@ -13,33 +13,46 @@ function ENT:Initialize()
 end
 
 function ENT:CreateRTXLight()
-    -- Safely destroy old light if it exists
     if self.rtxLightHandle then
-        pcall(function()
-            DestroyRTXLight(self.rtxLightHandle)
-        end)
+        pcall(function() DestroyRTXLight(self.rtxLightHandle) end)
         self.rtxLightHandle = nil
     end
 
-    -- Create new light with error handling
+    local pos = self:GetPos()
+    local size = self:GetLightSize()
+    local brightness = self:GetLightBrightness()
+    local r = self:GetLightR()
+    local g = self:GetLightG()
+    local b = self:GetLightB()
+
+    print(string.format("[RTX Light Entity] Creating light - Pos: %.2f,%.2f,%.2f, Size: %f, Brightness: %f, Color: %d,%d,%d",
+        pos.x, pos.y, pos.z, size, brightness, r, g, b))
+
     local success, handle = pcall(function()
-        local pos = self:GetPos()
         return CreateRTXLight(
-            pos.x, pos.y, pos.z,
-            math.max(1, self:GetLightSize()),
-            math.max(0.1, self:GetLightBrightness()),
-            math.Clamp(self:GetLightR(), 0, 255),
-            math.Clamp(self:GetLightG(), 0, 255),
-            math.Clamp(self:GetLightB(), 0, 255)
+            pos.x, 
+            pos.y, 
+            pos.z,
+            size,
+            brightness,
+            r,
+            g,
+            b
         )
     end)
 
     if success and handle then
         self.rtxLightHandle = handle
-        self.lastUpdatePos = self:GetPos()
+        self.lastUpdatePos = pos
         self.lastUpdateTime = CurTime()
     else
         ErrorNoHalt("[RTX Light] Failed to create light: ", tostring(handle), "\n")
+    end
+end
+
+function ENT:OnNetworkVarChanged(name, old, new)
+    if IsValid(self) and self.rtxLightHandle then
+        self:CreateRTXLight() -- Recreate light with new properties
     end
 end
 
@@ -57,11 +70,11 @@ function ENT:Think()
                 return UpdateRTXLight(
                     self.rtxLightHandle,
                     pos.x, pos.y, pos.z,
-                    math.max(1, self:GetLightSize()),
-                    math.max(0.1, self:GetLightBrightness()),
-                    math.Clamp(self:GetLightR(), 0, 255),
-                    math.Clamp(self:GetLightG(), 0, 255),
-                    math.Clamp(self:GetLightB(), 0, 255)
+                    self:GetLightSize() / 10,  -- Scale down size
+                    self:GetLightBrightness() / 100,  -- Convert percentage to 0-1
+                    self:GetLightR(),
+                    self:GetLightG(),
+                    self:GetLightB()
                 )
             end)
             
@@ -86,6 +99,7 @@ function ENT:OnRemove()
     if self.rtxLightHandle then
         pcall(function()
             DestroyRTXLight(self.rtxLightHandle)
+            print("[RTX Light] Destroyed light handle:", self.rtxLightHandle)
         end)
         self.rtxLightHandle = nil
     end

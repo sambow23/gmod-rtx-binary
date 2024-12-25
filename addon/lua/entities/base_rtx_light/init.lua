@@ -2,30 +2,38 @@ AddCSLuaFile("cl_init.lua")
 AddCSLuaFile("shared.lua")
 include("shared.lua")
 
+cleanup.Register("rtx_lights")
+
 if SERVER then
     util.AddNetworkString("RTXLight_UpdateProperty")
 end
 
 function ENT:Initialize()
-    -- Use minimal model and disable effects
     self:SetModel("models/hunter/blocks/cube025x025x025.mdl")
     self:PhysicsInit(SOLID_VPHYSICS)
     self:SetMoveType(MOVETYPE_VPHYSICS)
     self:SetSolid(SOLID_VPHYSICS)
     
-    -- Make entity minimal
     self:SetMaterial("models/debug/debugwhite")
     self:DrawShadow(false)
     self:SetNoDraw(true)
     
-    -- Set default values
-    self:SetLightBrightness(100)
-    self:SetLightSize(200)
-    self:SetLightR(255)
-    self:SetLightG(255)
-    self:SetLightB(255)
+    -- Set properties from initial values if they exist
+    if self.InitialProperties then
+        self:SetLightBrightness(self.InitialProperties.brightness)
+        self:SetLightSize(self.InitialProperties.size)
+        self:SetLightR(self.InitialProperties.r)
+        self:SetLightG(self.InitialProperties.g)
+        self:SetLightB(self.InitialProperties.b)
+    else
+        -- Default values
+        self:SetLightBrightness(100)
+        self:SetLightSize(200)
+        self:SetLightR(255)
+        self:SetLightG(255)
+        self:SetLightB(255)
+    end
     
-    -- Freeze physics
     local phys = self:GetPhysicsObject()
     if IsValid(phys) then
         phys:EnableMotion(false)
@@ -51,4 +59,9 @@ if SERVER then
             ent:SetLightB(net.ReadUInt(8))
         end
     end)
+end
+
+function ENT:OnRemove()
+    -- Notify clients to cleanup their RTX light handles
+    self:Remove()
 end

@@ -37,33 +37,34 @@ LUA_FUNCTION(CreateRTXLight) {
         float g = LUA->CheckNumber(7);
         float b = LUA->CheckNumber(8);
 
-        Msg("[RTX Remix Fixes] Creating light at (%f, %f, %f) with size %f and brightness %f\n", 
-            x, y, z, size, brightness);
+        // Debug print received values
+        Msg("[RTX Light Module] Received values - Pos: %.2f,%.2f,%.2f, Size: %f, Brightness: %f, Color: %f,%f,%f\n",
+            x, y, z, size, brightness, r, g, b);
 
         auto props = RTXLightManager::LightProperties();
         props.x = x;
         props.y = y;
         props.z = z;
-        props.size = size < 1.0f ? 1.0f : size;  // Ensure minimum size
-        props.brightness = brightness < 0.1f ? 0.1f : brightness;  // Ensure minimum brightness
-        props.r = (r / 255.0f) > 1.0f ? 1.0f : (r / 255.0f < 0.0f ? 0.0f : r / 255.0f);  // Clamp to 0-1
-        props.g = (g / 255.0f) > 1.0f ? 1.0f : (g / 255.0f < 0.0f ? 0.0f : g / 255.0f);
-        props.b = (b / 255.0f) > 1.0f ? 1.0f : (b / 255.0f < 0.0f ? 0.0f : b / 255.0f);
+        props.size = size;
+        props.brightness = brightness;
+        props.r = r / 255.0f;
+        props.g = g / 255.0f;
+        props.b = b / 255.0f;
 
         auto& manager = RTXLightManager::Instance();
         auto handle = manager.CreateLight(props);
         if (!handle) {
-            Msg("[RTX Remix Fixes] Failed to create light!\n");
+            Msg("[RTX Light Module] Failed to create light!\n");
             LUA->ThrowError("[RTX Remix Fixes] - Failed to create light");
             return 0;
         }
 
-        Msg("[RTX Remix Fixes] Successfully created light handle\n");
+        Msg("[RTX Light Module] Light created successfully with handle %p\n", handle);
         LUA->PushUserdata(handle);
         return 1;
     }
     catch (...) {
-        Msg("[RTX Remix Fixes] Exception in CreateRTXLight\n");
+        Msg("[RTX Light Module] Exception in CreateRTXLight\n");
         LUA->ThrowError("[RTX Remix Fixes] - Exception in light creation");
         return 0;
     }
