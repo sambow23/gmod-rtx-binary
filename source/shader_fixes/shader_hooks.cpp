@@ -1,0 +1,747 @@
+#include "shader_hooks.h"
+#include <algorithm>
+#include <psapi.h>
+#pragma comment(lib, "psapi.lib")
+
+// Define the global variables here
+IShaderAPI* g_pShaderAPI = nullptr;
+IDirect3DDevice9* g_pD3DDevice = nullptr;
+
+// Initialize other static members
+ShaderAPIHooks::ShaderState ShaderAPIHooks::s_state;
+std::unordered_set<std::string> ShaderAPIHooks::s_knownProblematicShaders;
+std::unordered_set<std::string> ShaderAPIHooks::s_problematicMaterials;
+Detouring::Hook ShaderAPIHooks::s_ConMsg_hook;
+ShaderAPIHooks::ConMsg_t ShaderAPIHooks::g_original_ConMsg = nullptr;
+ShaderAPIHooks::DrawIndexedPrimitive_t ShaderAPIHooks::g_original_DrawIndexedPrimitive = nullptr;
+ShaderAPIHooks::SetVertexShaderConstantF_t ShaderAPIHooks::g_original_SetVertexShaderConstantF = nullptr;
+ShaderAPIHooks::SetStreamSource_t ShaderAPIHooks::g_original_SetStreamSource = nullptr;
+ShaderAPIHooks::SetVertexShader_t ShaderAPIHooks::g_original_SetVertexShader = nullptr;
+ShaderAPIHooks::DivisionFunction_t ShaderAPIHooks::g_original_DivisionFunction = nullptr;
+ShaderAPIHooks::VertexBufferLock_t ShaderAPIHooks::g_original_VertexBufferLock = nullptr;
+std::unordered_set<uintptr_t> ShaderAPIHooks::s_problematicAddresses;
+ShaderAPIHooks::ParticleRender_t ShaderAPIHooks::g_original_ParticleRender = nullptr;
+
+namespace {
+    bool IsValidPointer(const void* ptr, size_t size) {
+        if (!ptr) return false;
+        MEMORY_BASIC_INFORMATION mbi = { 0 };
+        if (VirtualQuery(ptr, &mbi, sizeof(mbi)) == 0) return false;
+        if (mbi.Protect & (PAGE_GUARD | PAGE_NOACCESS)) return false;
+        if (!(mbi.Protect & (PAGE_READONLY | PAGE_READWRITE | PAGE_EXECUTE_READ | PAGE_EXECUTE_READWRITE))) return false;
+        return true;
+    }
+}
+
+void ShaderAPIHooks::Initialize() {
+    try {
+        HMODULE shaderapidx9 = GetModuleHandle("shaderapidx9.dll");
+        if (!shaderapidx9) {
+            Error("[Shader Fixes] Failed to get shaderapidx9.dll module\n");
+            return;
+        }
+
+        // Add more specific patterns from the crash
+        static const std::pair<const char*, const char*> signatures[] = {
+            // Pattern leading to the idiv instruction from your crash dump
+            {"48 63 C8 99 F7 F9", "Division instruction"},
+            {"89 51 34 89 38 48 89 D9", "Function entry"},
+            {"8B F2 44 0F B6 C0", "Parameter setup"},
+            {"F7 F9 03 C1 0F AF C1", "Division and multiply"},
+            // The exact sequence from your crash
+            {"42 89 44 24 20 44 89 44 24 28", "Pre-crash sequence"},
+            {"48 8D 4C 24 20 E8", "Call sequence"}
+        };
+
+        for (const auto& sig : signatures) {
+            void* found_ptr = ScanSign(shaderapidx9, sig.first, strlen(sig.first));
+            if (found_ptr) {
+                Msg("[Shader Fixes] Found %s at %p\n", sig.second, found_ptr);
+
+                // Log surrounding bytes
+                unsigned char* bytes = reinterpret_cast<unsigned char*>(found_ptr);
+                Msg("[Shader Fixes] Bytes at %s: ", sig.second);
+                for (int i = -8; i <= 8; i++) {
+                    Msg("%02X ", bytes[i]);
+                }
+                Msg("\n");
+
+                // If this is a division instruction, hook it
+                if (strstr(sig.second, "Division")) {
+                    Detouring::Hook::Target target(found_ptr);
+                    m_DivisionFunction_hook.Create(target, DivisionFunction_detour);
+                    g_original_DivisionFunction = m_DivisionFunction_hook.GetTrampoline<DivisionFunction_t>();
+                    m_DivisionFunction_hook.Enable();
+                    Msg("[Shader Fixes] Hooked division at %p\n", found_ptr);
+                }
+            }
+        }
+
+        // Add SEH handler for the entire module
+        AddVectoredExceptionHandler(1, [](PEXCEPTION_POINTERS exceptionInfo) -> LONG {
+            if (exceptionInfo->ExceptionRecord->ExceptionCode == EXCEPTION_INT_DIVIDE_BY_ZERO) {
+                void* crashAddress = exceptionInfo->ExceptionRecord->ExceptionAddress;
+                Warning("[Shader Fixes] Caught division by zero at %p\n", crashAddress);
+                
+                // Get register values
+                Warning("Register values at crash:\n");
+                Warning("RAX: %016llX\n", exceptionInfo->ContextRecord->Rax);
+                Warning("RCX: %016llX\n", exceptionInfo->ContextRecord->Rcx);
+                Warning("RDX: %016llX\n", exceptionInfo->ContextRecord->Rdx);
+                
+                // Modify registers to prevent crash
+                exceptionInfo->ContextRecord->Rax = 1;  // Set result to 1
+                exceptionInfo->ContextRecord->Rip += 2; // Skip the division instruction
+                
+                return EXCEPTION_CONTINUE_EXECUTION;
+            }
+            return EXCEPTION_CONTINUE_SEARCH;
+        });
+
+        // Hook material system for particle detection
+        if (materials) {
+            void** vtable = *reinterpret_cast<void***>(materials);
+            if (vtable) {
+                // Hook GetRenderContext (typically index 114)
+                void* renderContextFunc = vtable[114];
+                if (renderContextFunc) {
+                    Msg("[Shader Fixes] Found GetRenderContext at %p\n", renderContextFunc);
+                    // Add hook here if needed
+                }
+            }
+        }
+
+        Msg("[Shader Fixes] Enhanced shader protection initialized with exception handler\n");
+
+        // Add vectored exception handler
+        PVOID handler = AddVectoredExceptionHandler(1, [](PEXCEPTION_POINTERS exceptionInfo) -> LONG {
+            if (exceptionInfo->ExceptionRecord->ExceptionCode == EXCEPTION_INT_DIVIDE_BY_ZERO) {
+                void* crashAddress = exceptionInfo->ExceptionRecord->ExceptionAddress;
+                Warning("[Shader Fixes] Caught division by zero at %p\n", crashAddress);
+                
+                // Log register state
+                Warning("[Shader Fixes] Register state:\n");
+                Warning("  RAX: %016llX\n", exceptionInfo->ContextRecord->Rax);
+                Warning("  RCX: %016llX\n", exceptionInfo->ContextRecord->Rcx);
+                Warning("  RDX: %016llX\n", exceptionInfo->ContextRecord->Rdx);
+                Warning("  R8:  %016llX\n", exceptionInfo->ContextRecord->R8);
+                Warning("  R9:  %016llX\n", exceptionInfo->ContextRecord->R9);
+                Warning("  RIP: %016llX\n", exceptionInfo->ContextRecord->Rip);
+
+                // Try to prevent the crash
+                exceptionInfo->ContextRecord->Rax = 1;  // Set result to 1
+                exceptionInfo->ContextRecord->Rip += 2; // Skip the division instruction
+                
+                return EXCEPTION_CONTINUE_EXECUTION;
+            }
+            return EXCEPTION_CONTINUE_SEARCH;
+        });
+
+        if (handler) {
+            Msg("[Shader Fixes] Installed vectored exception handler at %p\n", handler);
+        }
+
+        // Find D3D9 device
+        static const char device_sig[] = "BA E1 0D 74 5E 48 89 1D ?? ?? ?? ??";
+        auto device_ptr = ScanSign(shaderapidx9, device_sig, sizeof(device_sig) - 1);
+        if (device_ptr) {
+            auto offset = ((uint32_t*)device_ptr)[2];
+            g_pD3DDevice = *(IDirect3DDevice9**)((char*)device_ptr + offset + 12);
+            if (!g_pD3DDevice) {
+                Error("[Shader Fixes] Failed to get D3D9 device\n");
+            }
+        }
+
+        if (!g_pD3DDevice) {
+            Error("[Shader Fixes] Failed to find D3D9 device\n");
+            return;
+        }
+
+        // Get vtable
+        void** vftable = *reinterpret_cast<void***>(g_pD3DDevice);
+        if (!vftable) {
+            Error("[Shader Fixes] Failed to get D3D9 vtable\n");
+            return;
+        }
+
+        // Hook DrawIndexedPrimitive (index 82)
+        Detouring::Hook::Target target_draw(&vftable[82]);
+        m_DrawIndexedPrimitive_hook.Create(target_draw, DrawIndexedPrimitive_detour);
+        g_original_DrawIndexedPrimitive = m_DrawIndexedPrimitive_hook.GetTrampoline<DrawIndexedPrimitive_t>();
+        m_DrawIndexedPrimitive_hook.Enable();
+
+        // Hook SetStreamSource (index 100)
+        Detouring::Hook::Target target_stream(&vftable[100]);
+        m_SetStreamSource_hook.Create(target_stream, SetStreamSource_detour);
+        g_original_SetStreamSource = m_SetStreamSource_hook.GetTrampoline<SetStreamSource_t>();
+        m_SetStreamSource_hook.Enable();
+
+        // Hook SetVertexShader (index 92)
+        Detouring::Hook::Target target_shader(&vftable[92]);
+        m_SetVertexShader_hook.Create(target_shader, SetVertexShader_detour);
+        g_original_SetVertexShader = m_SetVertexShader_hook.GetTrampoline<SetVertexShader_t>();
+        m_SetVertexShader_hook.Enable();
+
+        // Hook SetVertexShaderConstantF (index 94)
+        Detouring::Hook::Target target_const(&vftable[94]);
+        m_SetVertexShaderConstantF_hook.Create(target_const, SetVertexShaderConstantF_detour);
+        g_original_SetVertexShaderConstantF = m_SetVertexShaderConstantF_hook.GetTrampoline<SetVertexShaderConstantF_t>();
+        m_SetVertexShaderConstantF_hook.Enable();
+
+        // Hook ConMsg to catch console messages
+        void* conMsg = GetProcAddress(GetModuleHandle("tier0.dll"), "ConMsg");
+        if (conMsg) {
+            Detouring::Hook::Target target(conMsg);
+            s_ConMsg_hook.Create(target, ConMsg_detour);
+            g_original_ConMsg = s_ConMsg_hook.GetTrampoline<ConMsg_t>();
+            s_ConMsg_hook.Enable();
+        }
+
+        Msg("[Shader Fixes] Enhanced shader protection initialized\n");
+    }
+    catch (...) {
+        Error("[Shader Fixes] Failed to initialize shader hooks\n");
+    }
+}
+
+void __fastcall ShaderAPIHooks::ParticleRender_detour(void* thisptr) {
+    static float s_lastLogTime = 0.0f;
+    float currentTime = GetTickCount64() / 1000.0f;
+
+    __try {
+        s_state.isProcessingParticle = true;
+        
+        // Log every second at most
+        if (currentTime - s_lastLogTime > 1.0f) {
+            Msg("[Shader Fixes] Particle render called from %p\n", _ReturnAddress());
+            s_lastLogTime = currentTime;
+        }
+
+        // Add pre-render checks
+        if (thisptr) {
+            __try {
+                // Verify the vtable pointer
+                if (!IsValidPointer(thisptr, sizeof(void*))) {
+                    Warning("[Shader Fixes] Invalid particle system pointer\n");
+                    return;
+                }
+
+                void** vtable = *reinterpret_cast<void***>(thisptr);
+                if (vtable && IsValidPointer(vtable, sizeof(void*) * 3)) {
+                    // Try to get particle system info safely
+                    if (vtable[2] && IsValidPointer(vtable[2], sizeof(void*))) {
+                        const char* name = reinterpret_cast<const char*>(vtable[2]);
+                        Msg("[Shader Fixes] Processing particle system at %p, vtable: %p\n", 
+                            thisptr, vtable);
+                    }
+                }
+            }
+            __except(EXCEPTION_EXECUTE_HANDLER) {
+                Warning("[Shader Fixes] Exception while accessing particle info at %p\n", thisptr);
+            }
+        }
+
+        // Call original with exception handling
+        if (g_original_ParticleRender) {
+            __try {
+                g_original_ParticleRender(thisptr);
+            }
+            __except(EXCEPTION_EXECUTE_HANDLER) {
+                Warning("[Shader Fixes] Exception in original particle render at %p\n", 
+                    _ReturnAddress());
+            }
+        }
+    }
+    __except(EXCEPTION_EXECUTE_HANDLER) {
+        Warning("[Shader Fixes] Top-level exception in particle rendering\n");
+    }
+
+    s_state.isProcessingParticle = false;
+}
+
+int __fastcall ShaderAPIHooks::DivisionFunction_detour(int a1, int a2, int dividend, int divisor) {
+    void* returnAddress = _ReturnAddress();
+    
+    // Get stack pointer using intrinsic
+    void* stackPointer = _AddressOfReturnAddress();
+
+    // Log before attempting division
+    Msg("[Shader Fixes] Division operation:\n"
+        "  Return Address: %p\n"
+        "  Stack Pointer: %p\n"
+        "  Parameters: a1=%d, a2=%d, dividend=%d, divisor=%d\n",
+        returnAddress, stackPointer, a1, a2, dividend, divisor);
+
+    // Capture stack trace
+    void* stackTrace[10] = {};
+    USHORT frames = CaptureStackBackTrace(0, 10, stackTrace, nullptr);
+    Msg("[Shader Fixes] Stack trace:\n");
+    for (USHORT i = 0; i < frames; i++) {
+        Msg("  %d: %p\n", i, stackTrace[i]);
+    }
+
+    // Add module information
+    HMODULE modules[10] = {};
+    DWORD needed = 0;
+    if (EnumProcessModules(GetCurrentProcess(), modules, sizeof(modules), &needed)) {
+        for (DWORD i = 0; i < (needed / sizeof(HMODULE)); i++) {
+            char modName[MAX_PATH];
+            if (GetModuleFileNameA(modules[i], modName, sizeof(modName))) {
+                MODULEINFO modInfo;
+                if (GetModuleInformation(GetCurrentProcess(), modules[i], &modInfo, sizeof(modInfo))) {
+                    if (returnAddress >= modInfo.lpBaseOfDll && 
+                        returnAddress < (void*)((char*)modInfo.lpBaseOfDll + modInfo.SizeOfImage)) {
+                        Msg("  Module: %s Base: %p Size: %u\n", 
+                            modName, modInfo.lpBaseOfDll, modInfo.SizeOfImage);
+                    }
+                }
+            }
+        }
+    }
+
+    __try {
+        if (divisor == 0) {
+            Warning("[Shader Fixes] Prevented division by zero! Caller: %p\n", returnAddress);
+            return 1;
+        }
+
+        // Validate input ranges
+        if (abs(dividend) > 1000000 || abs(divisor) < 1) {
+            Warning("[Shader Fixes] Suspicious division values at %p\n", returnAddress);
+            return dividend < 0 ? -1 : 1;
+        }
+
+        // Log the operation
+        int result = dividend / divisor;
+        Msg("[Shader Fixes] Division result: %d = %d / %d\n", result, dividend, divisor);
+        
+        return result;
+    }
+    __except(EXCEPTION_EXECUTE_HANDLER) {
+        Warning("[Shader Fixes] Exception in division at %p\n", returnAddress);
+        return 1;
+    }
+}
+
+HRESULT __stdcall ShaderAPIHooks::VertexBufferLock_detour(
+    void* thisptr,
+    UINT offsetToLock,
+    UINT sizeToLock,
+    void** ppbData,
+    DWORD flags) {
+    
+    __try {
+        // Log the attempt
+        Msg("[Shader Fixes] CVertexBuffer::Lock - Offset: %u, Size: %u\n", offsetToLock, sizeToLock);
+
+        // Validate parameters before calling original
+        if (!thisptr) {
+            Warning("[Shader Fixes] CVertexBuffer::Lock failed - null vertex buffer\n");
+            return E_FAIL;
+        }
+
+        // Check for division-prone calculations
+        if (sizeToLock > 0 && offsetToLock > 0) {
+            UINT divCheck = offsetToLock / sizeToLock;
+            if (divCheck == 0) {
+                Warning("[Shader Fixes] CVertexBuffer::Lock - Potential division by zero prevented\n");
+                return E_FAIL;
+            }
+        }
+
+        return g_original_VertexBufferLock(thisptr, offsetToLock, sizeToLock, ppbData, flags);
+    }
+    __except(EXCEPTION_EXECUTE_HANDLER) {
+        Warning("[Shader Fixes] Exception in CVertexBuffer::Lock at %p\n", _ReturnAddress());
+        return E_FAIL;
+    }
+}
+
+void ShaderAPIHooks::Shutdown() {
+    m_DrawIndexedPrimitive_hook.Disable();
+    m_SetVertexShaderConstantF_hook.Disable();
+    m_SetStreamSource_hook.Disable();
+    m_SetVertexShader_hook.Disable();
+    s_ConMsg_hook.Disable();
+}
+
+void __cdecl ShaderAPIHooks::ConMsg_detour(const char* fmt, ...) {
+    char buffer[2048];
+    va_list args;
+    va_start(args, fmt);
+    vsnprintf(buffer, sizeof(buffer), fmt, args);
+    va_end(args);
+
+    // Check for shader/particle error messages
+    if (strstr(buffer, "C_OP_RenderSprites") ||
+        strstr(buffer, "shader") ||
+        strstr(buffer, "particle") ||
+        strstr(buffer, "material")) {
+        
+        s_state.lastErrorMessage = buffer;
+        s_state.lastErrorTime = GetTickCount64() / 1000.0f;
+        s_state.isProcessingParticle = true;
+
+        // Extract material name if present
+        std::regex materialRegex("Material ([^\\s]+)");
+        std::smatch matches;
+        std::string bufferStr(buffer);
+        if (std::regex_search(bufferStr, matches, materialRegex)) {
+            std::string materialName = matches[1].str();
+            s_problematicMaterials.insert(materialName);
+            Warning("[Shader Fixes] Added problematic material: %s\n", materialName.c_str());
+        }
+    }
+
+    if (g_original_ConMsg) {
+        g_original_ConMsg("%s", buffer);
+    }
+}
+
+HRESULT __stdcall ShaderAPIHooks::DrawIndexedPrimitive_detour(
+    IDirect3DDevice9* device,
+    D3DPRIMITIVETYPE PrimitiveType,
+    INT BaseVertexIndex,
+    UINT MinVertexIndex,
+    UINT NumVertices,
+    UINT StartIndex,
+    UINT PrimitiveCount) {
+    
+    __try {
+        if (s_state.isProcessingParticle || IsParticleSystem()) {
+            if (!ValidatePrimitiveParams(MinVertexIndex, NumVertices, PrimitiveCount)) {
+                Warning("[Shader Fixes] Blocked invalid draw call for %s\n", 
+                    s_state.lastMaterialName.c_str());
+                return D3D_OK;
+            }
+        }
+
+        return g_original_DrawIndexedPrimitive(
+            device, PrimitiveType, BaseVertexIndex, MinVertexIndex,
+            NumVertices, StartIndex, PrimitiveCount);
+    }
+    __except(EXCEPTION_EXECUTE_HANDLER) {
+        Warning("[Shader Fixes] Exception in DrawIndexedPrimitive for %s\n", 
+            s_state.lastMaterialName.c_str());
+        return D3D_OK;
+    }
+}
+
+HRESULT __stdcall ShaderAPIHooks::SetVertexShaderConstantF_detour(
+    IDirect3DDevice9* device,
+    UINT StartRegister,
+    CONST float* pConstantData,
+    UINT Vector4fCount) {
+    
+    __try {
+        if (s_state.isProcessingParticle || IsParticleSystem()) {
+            if (!ValidateShaderConstants(pConstantData, Vector4fCount)) {
+                Warning("[Shader Fixes] Blocked invalid shader constants for %s\n",
+                    s_state.lastMaterialName.c_str());
+                return D3D_OK;
+            }
+        }
+
+        return g_original_SetVertexShaderConstantF(
+            device, StartRegister, pConstantData, Vector4fCount);
+    }
+    __except(EXCEPTION_EXECUTE_HANDLER) {
+        Warning("[Shader Fixes] Exception in SetVertexShaderConstantF\n");
+        return D3D_OK;
+    }
+}
+
+HRESULT __stdcall ShaderAPIHooks::SetStreamSource_detour(
+    IDirect3DDevice9* device,
+    UINT StreamNumber,
+    IDirect3DVertexBuffer9* pStreamData,
+    UINT OffsetInBytes,
+    UINT Stride) {
+    
+    __try {
+        if (s_state.isProcessingParticle || IsParticleSystem()) {
+            if (pStreamData && !ValidateParticleVertexBuffer(pStreamData, Stride)) {
+                Warning("[Shader Fixes] Blocked invalid vertex buffer for %s\n",
+                    s_state.lastMaterialName.c_str());
+                return D3D_OK;
+            }
+        }
+
+        return g_original_SetStreamSource(device, StreamNumber, pStreamData, OffsetInBytes, Stride);
+    }
+    __except(EXCEPTION_EXECUTE_HANDLER) {
+        Warning("[Shader Fixes] Exception in SetStreamSource\n");
+        return D3D_OK;
+    }
+}
+
+HRESULT __stdcall ShaderAPIHooks::SetVertexShader_detour(
+    IDirect3DDevice9* device,
+    IDirect3DVertexShader9* pShader) {
+    
+    __try {
+        if (s_state.isProcessingParticle || IsParticleSystem()) {
+            if (!ValidateVertexShader(pShader)) {
+                Warning("[Shader Fixes] Blocked invalid vertex shader for %s\n",
+                    s_state.lastMaterialName.c_str());
+                return D3D_OK;
+            }
+        }
+
+        return g_original_SetVertexShader(device, pShader);
+    }
+    __except(EXCEPTION_EXECUTE_HANDLER) {
+        Warning("[Shader Fixes] Exception in SetVertexShader\n");
+        return D3D_OK;
+    }
+}
+
+bool ShaderAPIHooks::ValidateVertexBuffer(
+    IDirect3DVertexBuffer9* pVertexBuffer,
+    UINT offsetInBytes,
+    UINT stride) {
+    
+    if (!pVertexBuffer) return false;
+
+    D3DVERTEXBUFFER_DESC desc;
+    if (FAILED(pVertexBuffer->GetDesc(&desc))) return false;
+
+    // Check for potentially dangerous calculations
+    if (stride == 0) {
+        Warning("[Shader Fixes] Zero stride detected in vertex buffer\n");
+        return false;
+    }
+
+    if (offsetInBytes >= desc.Size) {
+        Warning("[Shader Fixes] Offset (%u) exceeds buffer size (%u)\n", offsetInBytes, desc.Size);
+        return false;
+    }
+
+    // Check division safety
+    if (desc.Size > 0 && stride > 0) {
+        UINT vertexCount = desc.Size / stride;
+        if (vertexCount == 0) {
+            Warning("[Shader Fixes] Invalid vertex count calculation prevented\n");
+            return false;
+        }
+    }
+
+    void* data;
+    if (SUCCEEDED(pVertexBuffer->Lock(offsetInBytes, stride, &data, D3DLOCK_READONLY))) {
+        bool valid = true;
+        float* floatData = static_cast<float*>(data);
+        
+        try {
+            for (UINT i = 0; i < stride/sizeof(float); i++) {
+                // Log suspicious values
+                if (!_finite(floatData[i]) || _isnan(floatData[i])) {
+                    Warning("[Shader Fixes] Invalid float at offset %u: %f (addr: %p)\n", 
+                        i * sizeof(float), floatData[i], &floatData[i]);
+                    valid = false;
+                    break;
+                }
+            }
+        }
+        catch (...) {
+            Warning("[Shader Fixes] Exception during vertex buffer validation\n");
+            valid = false;
+        }
+        
+        pVertexBuffer->Unlock();
+        return valid;
+    }
+
+    return false;
+}
+
+bool ShaderAPIHooks::ValidateParticleVertexBuffer(IDirect3DVertexBuffer9* pVertexBuffer, UINT stride) {
+    if (!pVertexBuffer) return false;
+
+    D3DVERTEXBUFFER_DESC desc;
+    if (FAILED(pVertexBuffer->GetDesc(&desc))) return false;
+
+    void* data;
+    if (SUCCEEDED(pVertexBuffer->Lock(0, desc.Size, &data, D3DLOCK_READONLY))) {
+        bool valid = true;
+        float* floatData = static_cast<float*>(data);
+        
+        // Enhanced validation for particle data
+        for (UINT i = 0; i < desc.Size / sizeof(float); i++) {
+            // Check for invalid values
+            if (!_finite(floatData[i]) || _isnan(floatData[i])) {
+                Warning("[Shader Fixes] Invalid float detected at index %d: %f\n", i, floatData[i]);
+                valid = false;
+                break;
+            }
+            // Check for unreasonable values
+            if (fabsf(floatData[i]) > 1e6) {
+                Warning("[Shader Fixes] Unreasonable value detected at index %d: %f\n", i, floatData[i]);
+                valid = false;
+                break;
+            }
+            // Check for potential divide by zero
+            if (fabsf(floatData[i]) < 1e-6) {
+                Warning("[Shader Fixes] Near-zero value detected at index %d: %f\n", i, floatData[i]);
+                valid = false;
+                break;
+            }
+        }
+        
+        pVertexBuffer->Unlock();
+        return valid;
+    }
+
+    return false;
+}
+
+bool ShaderAPIHooks::ValidateShaderConstants(const float* pConstantData, UINT Vector4fCount) {
+    if (!pConstantData || Vector4fCount == 0) return false;
+
+    for (UINT i = 0; i < Vector4fCount * 4; i++) {
+        // Check for invalid values
+        if (!_finite(pConstantData[i]) || _isnan(pConstantData[i])) {
+            Warning("[Shader Fixes] Invalid shader constant at index %d: %f\n", i, pConstantData[i]);
+            return false;
+        }
+        // Check for values that might cause divide by zero
+        if (fabsf(pConstantData[i]) < 1e-6) {
+            Warning("[Shader Fixes] Near-zero shader constant at index %d: %f\n", i, pConstantData[i]);
+            return false;
+        }
+    }
+
+    return true;
+}
+
+bool ShaderAPIHooks::ValidatePrimitiveParams(
+    UINT MinVertexIndex,
+    UINT NumVertices,
+    UINT PrimitiveCount) {
+    
+    if (NumVertices == 0 || PrimitiveCount == 0) {
+        Warning("[Shader Fixes] Zero vertices or primitives\n");
+        return false;
+    }
+    if (MinVertexIndex >= NumVertices) {
+        Warning("[Shader Fixes] MinVertexIndex (%d) >= NumVertices (%d)\n", 
+            MinVertexIndex, NumVertices);
+        return false;
+    }
+
+    // Additional checks for particle system primitives
+    if (PrimitiveCount > 10000) {
+        Warning("[Shader Fixes] Excessive primitive count: %d\n", PrimitiveCount);
+        return false;
+    }
+
+    return true;
+}
+
+bool ShaderAPIHooks::ValidateVertexShader(IDirect3DVertexShader9* pShader) {
+    if (!pShader) return false;
+
+    // Basic shader validation
+    UINT functionSize = 0;
+    if (FAILED(pShader->GetFunction(nullptr, &functionSize)) || functionSize == 0) {
+        Warning("[Shader Fixes] Invalid shader function size\n");
+        return false;
+    }
+
+    // Additional validation could be added here
+    return true;
+}
+
+bool ShaderAPIHooks::IsParticleSystem() {
+    try {
+        if (!materials) return false;
+
+        IMatRenderContext* renderContext = materials->GetRenderContext();
+        if (!renderContext) return false;
+
+        IMaterial* currentMaterial = renderContext->GetCurrentMaterial();
+        if (!currentMaterial) return false;
+
+        const char* materialName = currentMaterial->GetName();
+        const char* shaderName = currentMaterial->GetShaderName();
+
+        UpdateShaderState(materialName, shaderName);
+
+        // Check if we're within the error window
+        float currentTime = GetTickCount64() / 1000.0f;
+        if (currentTime - s_state.lastErrorTime < 0.1f) {
+            return true;
+        }
+
+        // Check against known problematic materials
+        if (materialName && s_problematicMaterials.find(materialName) != s_problematicMaterials.end()) {
+            return true;
+        }
+
+        // Check shader name against known problematic patterns
+        if (shaderName && IsKnownProblematicShader(shaderName)) {
+            return true;
+        }
+
+        // Check blend states using global D3D device
+        if (g_pD3DDevice) {
+            DWORD srcBlend, destBlend, zEnable;
+            g_pD3DDevice->GetRenderState(D3DRS_SRCBLEND, &srcBlend);
+            g_pD3DDevice->GetRenderState(D3DRS_DESTBLEND, &destBlend);
+            g_pD3DDevice->GetRenderState(D3DRS_ZENABLE, &zEnable);
+
+            if ((srcBlend == D3DBLEND_SRCALPHA && destBlend == D3DBLEND_INVSRCALPHA) ||
+                (srcBlend == D3DBLEND_ONE && destBlend == D3DBLEND_ONE) ||
+                zEnable == D3DZB_FALSE) {
+                return true;
+            }
+        }
+    }
+    catch (...) {
+        Warning("[Shader Fixes] Exception in IsParticleSystem\n");
+    }
+    
+    return false;
+}
+
+void ShaderAPIHooks::UpdateShaderState(const char* materialName, const char* shaderName) {
+    if (materialName) {
+        s_state.lastMaterialName = materialName;
+    }
+    if (shaderName) {
+        s_state.lastShaderName = shaderName;
+    }
+}
+
+bool ShaderAPIHooks::IsKnownProblematicShader(const char* name) {
+    if (!name) return false;
+
+    for (const auto& pattern : s_knownProblematicShaders) {
+        if (strstr(name, pattern.c_str())) {
+            return true;
+        }
+    }
+    return false;
+}
+
+void ShaderAPIHooks::AddProblematicShader(const char* name) {
+    if (name) {
+        s_knownProblematicShaders.insert(name);
+        Warning("[Shader Fixes] Added problematic shader: %s\n", name);
+    }
+}
+
+void ShaderAPIHooks::LogShaderError(const char* format, ...) {
+    static float lastLogTime = 0.0f;
+    float currentTime = GetTickCount64() / 1000.0f;
+
+    if (currentTime - lastLogTime < 1.0f) return;
+    lastLogTime = currentTime;
+
+    char buffer[1024];
+    va_list args;
+    va_start(args, format);
+    vsnprintf(buffer, sizeof(buffer), format, args);
+    va_end(args);
+    
+    Warning("[Shader Fixes] %s", buffer);
+}

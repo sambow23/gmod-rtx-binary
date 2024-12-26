@@ -8,14 +8,14 @@
 #include <Windows.h>
 #include <d3d9.h>
 #include "rtx_lights/rtx_light_manager.h"
-
+#include "shader_fixes/shader_hooks.h"
 
 #ifdef GMOD_MAIN
 extern IMaterialSystem* materials = NULL;
 #endif
 
 extern IVEngineClient* engine = NULL;
-extern IShaderAPI* g_pShaderAPI = NULL;
+// extern IShaderAPI* g_pShaderAPI = NULL;
 remix::Interface* g_remix = nullptr;
 
 using namespace GarrysMod::Lua;
@@ -183,6 +183,9 @@ GMOD_MODULE_OPEN() {
     try {
         Msg("[RTX Remix Fixes 2] - Module loaded!\n"); 
 
+        // Initialize shader protection
+        ShaderAPIHooks::Instance().Initialize();
+
         // Find Source's D3D9 device
         auto sourceDevice = static_cast<IDirect3DDevice9Ex*>(FindD3D9Device());
         if (!sourceDevice) {
@@ -236,6 +239,9 @@ GMOD_MODULE_OPEN() {
 GMOD_MODULE_CLOSE() {
     try {
         Msg("[RTX] Shutting down module...\n");
+
+                // Shutdown shader protection
+        ShaderAPIHooks::Instance().Shutdown();
         
         RTXLightManager::Instance().Shutdown();
 
