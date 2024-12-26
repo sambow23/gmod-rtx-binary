@@ -35,20 +35,92 @@ namespace {
 
 void ShaderAPIHooks::Initialize() {
     try {
+        m_vehHandle = nullptr;
+        m_vehHandlerDivision = nullptr;
+
+        // First install our exception handlers
+        m_vehHandlerDivision = AddVectoredExceptionHandler(0, [](PEXCEPTION_POINTERS exceptionInfo) -> LONG {
+            if (exceptionInfo->ExceptionRecord->ExceptionCode == EXCEPTION_INT_DIVIDE_BY_ZERO) {
+                void* crashAddress = exceptionInfo->ExceptionRecord->ExceptionAddress;
+                
+                // Get module information
+                HMODULE hModule = NULL;
+                if (GetModuleHandleEx(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS,
+                    (LPCTSTR)crashAddress, &hModule)) {
+                    char moduleName[MAX_PATH];
+                    GetModuleFileNameA(hModule, moduleName, sizeof(moduleName));
+                    Warning("[Shader Fixes] Division by zero in module: %s\n", moduleName);
+                }
+
+                // Detailed crash context
+                Warning("[Shader Fixes] Division crash details:\n");
+                Warning("  Address: %p\n", crashAddress);
+                Warning("  Thread ID: %u\n", GetCurrentThreadId());
+                
+                // Stack trace
+                void* stack[64];
+                WORD frames = CaptureStackBackTrace(0, 64, stack, NULL);
+                Warning("  Stack trace (%d frames):\n", frames);
+                for (WORD i = 0; i < frames; i++) {
+                    Warning("    %d: %p\n", i, stack[i]);
+                }
+
+                // Set safe values and continue
+                exceptionInfo->ContextRecord->Rax = 1;
+                exceptionInfo->ContextRecord->Rip += 2;
+                return EXCEPTION_CONTINUE_EXECUTION;
+            }
+            return EXCEPTION_CONTINUE_SEARCH;
+        });
+
+        if (!m_vehHandlerDivision) {
+            Error("[Shader Fixes] Failed to install division-specific VEH\n");
+            return;
+        }
+
+        Msg("[Shader Fixes] Installed division-specific VEH at %p\n", m_vehHandlerDivision);
+
+        // General exception handler
+        m_vehHandle = AddVectoredExceptionHandler(1, [](PEXCEPTION_POINTERS exceptionInfo) -> LONG {
+            if (exceptionInfo->ExceptionRecord->ExceptionCode == EXCEPTION_INT_DIVIDE_BY_ZERO) {
+                void* crashAddress = exceptionInfo->ExceptionRecord->ExceptionAddress;
+                Warning("[Shader Fixes] Caught division by zero at %p\n", crashAddress);
+                
+                Warning("[Shader Fixes] Register state:\n");
+                Warning("  RAX: %016llX\n", exceptionInfo->ContextRecord->Rax);
+                Warning("  RCX: %016llX\n", exceptionInfo->ContextRecord->Rcx);
+                Warning("  RDX: %016llX\n", exceptionInfo->ContextRecord->Rdx);
+                Warning("  R8:  %016llX\n", exceptionInfo->ContextRecord->R8);
+                Warning("  R9:  %016llX\n", exceptionInfo->ContextRecord->R9);
+                Warning("  RIP: %016llX\n", exceptionInfo->ContextRecord->Rip);
+
+                exceptionInfo->ContextRecord->Rax = 1;
+                exceptionInfo->ContextRecord->Rip += 2;
+                return EXCEPTION_CONTINUE_EXECUTION;
+            }
+            return EXCEPTION_CONTINUE_SEARCH;
+        });
+
+        if (!m_vehHandle) {
+            Error("[Shader Fixes] Failed to install general VEH\n");
+            return;
+        }
+
+        Msg("[Shader Fixes] Installed general VEH at %p\n", m_vehHandle);
+
+        // Get shaderapidx9.dll module
         HMODULE shaderapidx9 = GetModuleHandle("shaderapidx9.dll");
         if (!shaderapidx9) {
             Error("[Shader Fixes] Failed to get shaderapidx9.dll module\n");
             return;
         }
 
-        // Add more specific patterns from the crash
+        // Find and hook problematic patterns
         static const std::pair<const char*, const char*> signatures[] = {
-            // Pattern leading to the idiv instruction from your crash dump
             {"48 63 C8 99 F7 F9", "Division instruction"},
             {"89 51 34 89 38 48 89 D9", "Function entry"},
             {"8B F2 44 0F B6 C0", "Parameter setup"},
             {"F7 F9 03 C1 0F AF C1", "Division and multiply"},
-            // The exact sequence from your crash
             {"42 89 44 24 20 44 89 44 24 28", "Pre-crash sequence"},
             {"48 8D 4C 24 20 E8", "Call sequence"}
         };
@@ -58,7 +130,7 @@ void ShaderAPIHooks::Initialize() {
             if (found_ptr) {
                 Msg("[Shader Fixes] Found %s at %p\n", sig.second, found_ptr);
 
-                // Log surrounding bytes
+                // Log surrounding bytes for verification
                 unsigned char* bytes = reinterpret_cast<unsigned char*>(found_ptr);
                 Msg("[Shader Fixes] Bytes at %s: ", sig.second);
                 for (int i = -8; i <= 8; i++) {
@@ -66,7 +138,7 @@ void ShaderAPIHooks::Initialize() {
                 }
                 Msg("\n");
 
-                // If this is a division instruction, hook it
+                // Hook division instructions
                 if (strstr(sig.second, "Division")) {
                     Detouring::Hook::Target target(found_ptr);
                     m_DivisionFunction_hook.Create(target, DivisionFunction_detour);
@@ -77,70 +149,6 @@ void ShaderAPIHooks::Initialize() {
             }
         }
 
-        // Add SEH handler for the entire module
-        AddVectoredExceptionHandler(1, [](PEXCEPTION_POINTERS exceptionInfo) -> LONG {
-            if (exceptionInfo->ExceptionRecord->ExceptionCode == EXCEPTION_INT_DIVIDE_BY_ZERO) {
-                void* crashAddress = exceptionInfo->ExceptionRecord->ExceptionAddress;
-                Warning("[Shader Fixes] Caught division by zero at %p\n", crashAddress);
-                
-                // Get register values
-                Warning("Register values at crash:\n");
-                Warning("RAX: %016llX\n", exceptionInfo->ContextRecord->Rax);
-                Warning("RCX: %016llX\n", exceptionInfo->ContextRecord->Rcx);
-                Warning("RDX: %016llX\n", exceptionInfo->ContextRecord->Rdx);
-                
-                // Modify registers to prevent crash
-                exceptionInfo->ContextRecord->Rax = 1;  // Set result to 1
-                exceptionInfo->ContextRecord->Rip += 2; // Skip the division instruction
-                
-                return EXCEPTION_CONTINUE_EXECUTION;
-            }
-            return EXCEPTION_CONTINUE_SEARCH;
-        });
-
-        // Hook material system for particle detection
-        if (materials) {
-            void** vtable = *reinterpret_cast<void***>(materials);
-            if (vtable) {
-                // Hook GetRenderContext (typically index 114)
-                void* renderContextFunc = vtable[114];
-                if (renderContextFunc) {
-                    Msg("[Shader Fixes] Found GetRenderContext at %p\n", renderContextFunc);
-                    // Add hook here if needed
-                }
-            }
-        }
-
-        Msg("[Shader Fixes] Enhanced shader protection initialized with exception handler\n");
-
-        // Add vectored exception handler
-        PVOID handler = AddVectoredExceptionHandler(1, [](PEXCEPTION_POINTERS exceptionInfo) -> LONG {
-            if (exceptionInfo->ExceptionRecord->ExceptionCode == EXCEPTION_INT_DIVIDE_BY_ZERO) {
-                void* crashAddress = exceptionInfo->ExceptionRecord->ExceptionAddress;
-                Warning("[Shader Fixes] Caught division by zero at %p\n", crashAddress);
-                
-                // Log register state
-                Warning("[Shader Fixes] Register state:\n");
-                Warning("  RAX: %016llX\n", exceptionInfo->ContextRecord->Rax);
-                Warning("  RCX: %016llX\n", exceptionInfo->ContextRecord->Rcx);
-                Warning("  RDX: %016llX\n", exceptionInfo->ContextRecord->Rdx);
-                Warning("  R8:  %016llX\n", exceptionInfo->ContextRecord->R8);
-                Warning("  R9:  %016llX\n", exceptionInfo->ContextRecord->R9);
-                Warning("  RIP: %016llX\n", exceptionInfo->ContextRecord->Rip);
-
-                // Try to prevent the crash
-                exceptionInfo->ContextRecord->Rax = 1;  // Set result to 1
-                exceptionInfo->ContextRecord->Rip += 2; // Skip the division instruction
-                
-                return EXCEPTION_CONTINUE_EXECUTION;
-            }
-            return EXCEPTION_CONTINUE_SEARCH;
-        });
-
-        if (handler) {
-            Msg("[Shader Fixes] Installed vectored exception handler at %p\n", handler);
-        }
-
         // Find D3D9 device
         static const char device_sig[] = "BA E1 0D 74 5E 48 89 1D ?? ?? ?? ??";
         auto device_ptr = ScanSign(shaderapidx9, device_sig, sizeof(device_sig) - 1);
@@ -149,58 +157,74 @@ void ShaderAPIHooks::Initialize() {
             g_pD3DDevice = *(IDirect3DDevice9**)((char*)device_ptr + offset + 12);
             if (!g_pD3DDevice) {
                 Error("[Shader Fixes] Failed to get D3D9 device\n");
+                return;
             }
-        }
-
-        if (!g_pD3DDevice) {
-            Error("[Shader Fixes] Failed to find D3D9 device\n");
+        } else {
+            Error("[Shader Fixes] Failed to find D3D9 device signature\n");
             return;
         }
 
-        // Get vtable
+        // Get D3D9 vtable
         void** vftable = *reinterpret_cast<void***>(g_pD3DDevice);
         if (!vftable) {
             Error("[Shader Fixes] Failed to get D3D9 vtable\n");
             return;
         }
 
-        // Hook DrawIndexedPrimitive (index 82)
-        Detouring::Hook::Target target_draw(&vftable[82]);
-        m_DrawIndexedPrimitive_hook.Create(target_draw, DrawIndexedPrimitive_detour);
-        g_original_DrawIndexedPrimitive = m_DrawIndexedPrimitive_hook.GetTrampoline<DrawIndexedPrimitive_t>();
-        m_DrawIndexedPrimitive_hook.Enable();
+        // Hook D3D9 functions
+        try {
+            // DrawIndexedPrimitive (index 82)
+            Detouring::Hook::Target target_draw(&vftable[82]);
+            m_DrawIndexedPrimitive_hook.Create(target_draw, DrawIndexedPrimitive_detour);
+            g_original_DrawIndexedPrimitive = m_DrawIndexedPrimitive_hook.GetTrampoline<DrawIndexedPrimitive_t>();
+            m_DrawIndexedPrimitive_hook.Enable();
+            Msg("[Shader Fixes] Hooked DrawIndexedPrimitive\n");
 
-        // Hook SetStreamSource (index 100)
-        Detouring::Hook::Target target_stream(&vftable[100]);
-        m_SetStreamSource_hook.Create(target_stream, SetStreamSource_detour);
-        g_original_SetStreamSource = m_SetStreamSource_hook.GetTrampoline<SetStreamSource_t>();
-        m_SetStreamSource_hook.Enable();
+            // SetStreamSource (index 100)
+            Detouring::Hook::Target target_stream(&vftable[100]);
+            m_SetStreamSource_hook.Create(target_stream, SetStreamSource_detour);
+            g_original_SetStreamSource = m_SetStreamSource_hook.GetTrampoline<SetStreamSource_t>();
+            m_SetStreamSource_hook.Enable();
+            Msg("[Shader Fixes] Hooked SetStreamSource\n");
 
-        // Hook SetVertexShader (index 92)
-        Detouring::Hook::Target target_shader(&vftable[92]);
-        m_SetVertexShader_hook.Create(target_shader, SetVertexShader_detour);
-        g_original_SetVertexShader = m_SetVertexShader_hook.GetTrampoline<SetVertexShader_t>();
-        m_SetVertexShader_hook.Enable();
+            // SetVertexShader (index 92)
+            Detouring::Hook::Target target_shader(&vftable[92]);
+            m_SetVertexShader_hook.Create(target_shader, SetVertexShader_detour);
+            g_original_SetVertexShader = m_SetVertexShader_hook.GetTrampoline<SetVertexShader_t>();
+            m_SetVertexShader_hook.Enable();
+            Msg("[Shader Fixes] Hooked SetVertexShader\n");
 
-        // Hook SetVertexShaderConstantF (index 94)
-        Detouring::Hook::Target target_const(&vftable[94]);
-        m_SetVertexShaderConstantF_hook.Create(target_const, SetVertexShaderConstantF_detour);
-        g_original_SetVertexShaderConstantF = m_SetVertexShaderConstantF_hook.GetTrampoline<SetVertexShaderConstantF_t>();
-        m_SetVertexShaderConstantF_hook.Enable();
+            // SetVertexShaderConstantF (index 94)
+            Detouring::Hook::Target target_const(&vftable[94]);
+            m_SetVertexShaderConstantF_hook.Create(target_const, SetVertexShaderConstantF_detour);
+            g_original_SetVertexShaderConstantF = m_SetVertexShaderConstantF_hook.GetTrampoline<SetVertexShaderConstantF_t>();
+            m_SetVertexShaderConstantF_hook.Enable();
+            Msg("[Shader Fixes] Hooked SetVertexShaderConstantF\n");
+        }
+        catch (...) {
+            Error("[Shader Fixes] Failed to hook one or more D3D9 functions\n");
+            return;
+        }
 
-        // Hook ConMsg to catch console messages
+        // Hook ConMsg for console message interception
         void* conMsg = GetProcAddress(GetModuleHandle("tier0.dll"), "ConMsg");
         if (conMsg) {
             Detouring::Hook::Target target(conMsg);
             s_ConMsg_hook.Create(target, ConMsg_detour);
             g_original_ConMsg = s_ConMsg_hook.GetTrampoline<ConMsg_t>();
             s_ConMsg_hook.Enable();
+            Msg("[Shader Fixes] Hooked ConMsg\n");
+        } else {
+            Warning("[Shader Fixes] Failed to hook ConMsg - console interception disabled\n");
         }
 
-        Msg("[Shader Fixes] Enhanced shader protection initialized\n");
+        Msg("[Shader Fixes] Enhanced shader protection initialized successfully\n");
+    }
+    catch (const std::exception& e) {
+        Error("[Shader Fixes] Exception during initialization: %s\n", e.what());
     }
     catch (...) {
-        Error("[Shader Fixes] Failed to initialize shader hooks\n");
+        Error("[Shader Fixes] Unknown exception during initialization\n");
     }
 }
 
@@ -358,11 +382,34 @@ HRESULT __stdcall ShaderAPIHooks::VertexBufferLock_detour(
 }
 
 void ShaderAPIHooks::Shutdown() {
+    // Remove VEH handlers first
+    if (m_vehHandlerDivision) {
+        if (RemoveVectoredExceptionHandler(m_vehHandlerDivision)) {
+            Msg("[Shader Fixes] Successfully removed division-specific VEH\n");
+        } else {
+            Warning("[Shader Fixes] Failed to remove division-specific VEH\n");
+        }
+        m_vehHandlerDivision = nullptr;
+    }
+
+    if (m_vehHandle) {
+        if (RemoveVectoredExceptionHandler(m_vehHandle)) {
+            Msg("[Shader Fixes] Successfully removed general VEH\n");
+        } else {
+            Warning("[Shader Fixes] Failed to remove general VEH\n");
+        }
+        m_vehHandle = nullptr;
+    }
+
+    // Existing shutdown code
     m_DrawIndexedPrimitive_hook.Disable();
     m_SetVertexShaderConstantF_hook.Disable();
     m_SetStreamSource_hook.Disable();
     m_SetVertexShader_hook.Disable();
     s_ConMsg_hook.Disable();
+
+    // Log shutdown completion
+    Msg("[Shader Fixes] Shutdown complete\n");
 }
 
 void __cdecl ShaderAPIHooks::ConMsg_detour(const char* fmt, ...) {

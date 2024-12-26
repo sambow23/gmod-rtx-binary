@@ -137,4 +137,8 @@ private:
     typedef void (__fastcall* ParticleRender_t)(void* thisptr);
     static ParticleRender_t g_original_ParticleRender;
     static void __fastcall ParticleRender_detour(void* thisptr);
+
+    // Add VEH handle storage
+    PVOID m_vehHandle;
+    PVOID m_vehHandlerDivision;
 };

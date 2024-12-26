@@ -14,7 +14,6 @@
 extern IMaterialSystem* materials = NULL;
 #endif
 
-extern IVEngineClient* engine = NULL;
 // extern IShaderAPI* g_pShaderAPI = NULL;
 remix::Interface* g_remix = nullptr;
 
