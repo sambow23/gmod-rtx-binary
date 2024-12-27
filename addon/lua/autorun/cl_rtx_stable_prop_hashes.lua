@@ -1,6 +1,7 @@
+if not CLIENT then return end
 CreateClientConVar(	"rtx_disablevertexlighting", 1,  true, false) 
 
-function DrawFix( self, flags )
+local function DrawFix( self, flags )
     if (GetConVar( "mat_fullbright" ):GetBool()) then return end
     render.SuppressEngineLighting( GetConVar( "rtx_disablevertexlighting" ):GetBool() )
 
@@ -19,10 +20,13 @@ function DrawFix( self, flags )
     render.SuppressEngineLighting( false )
 
 end
-function ApplyRenderOverride(ent)
+local function ApplyRenderOverride(ent)
 	ent.RenderOverride = DrawFix 
 end
-function FixupEntities() 
+local function FixupEntity(ent) 
+	if (ent:GetClass() != "procedural_shard") then ApplyRenderOverride(ent) end
+end
+local function FixupEntities() 
 
 	hook.Add( "OnEntityCreated", "RTXEntityFixups", FixupEntity)
 	for k, v in pairs(ents.GetAll()) do
@@ -30,11 +34,8 @@ function FixupEntities()
 	end
 
 end
-function FixupEntity(ent) 
-	if (ent:GetClass() != "procedural_shard") then ApplyRenderOverride(ent) end
-end
 
-function RTXLoad()
+local function RTXLoadPropHashFixer()
     FixupEntities()
 end
-hook.Add( "InitPostEntity", "RTXReady", RTXLoad)  
+hook.Add( "InitPostEntity", "RTXReady_PropHashFixer", RTXLoadPropHashFixer)  
