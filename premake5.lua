@@ -28,8 +28,15 @@ CreateWorkspace({name = "RTXFixesBinary", abi_compatible = false, path = ""})
 		IncludeSDKTier1()
 
 		includedirs {
-			"public/include/remix",
+			"public/include",
 		} 
+
+		
+		files {
+			"source/rtx_lights/*",
+			"source/shader_fixes/*",
+		} 
+
 
 		filter("system:windows")
 			files({"source/win32/*.cpp", "source/win32/*.hpp"})
