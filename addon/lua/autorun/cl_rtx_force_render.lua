@@ -1,5 +1,5 @@
 if not CLIENT then return end
-require(niknaks)
+require("niknaks")
 
 -- ConVars
 local CONVARS = {
