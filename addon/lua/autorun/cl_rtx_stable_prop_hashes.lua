@@ -1,5 +1,5 @@
 if not CLIENT then return end
-CreateClientConVar(	"rtx_disablevertexlighting", 1,  true, false) 
+CreateClientConVar(	"rtx_disablevertexlighting", 0,  true, false) 
 
 local function DrawFix( self, flags )
     if (GetConVar( "mat_fullbright" ):GetBool()) then return end
