@@ -9,6 +9,7 @@
 #include <d3d9.h>
 #include "rtx_lights/rtx_light_manager.h"
 #include "shader_fixes/shader_hooks.h"
+#include "prop_fixes.h" 
 
 #ifdef GMOD_MAIN
 extern IMaterialSystem* materials = NULL;
@@ -184,6 +185,7 @@ GMOD_MODULE_OPEN() {
 
         // Initialize shader protection
         ShaderAPIHooks::Instance().Initialize();
+        ModelRenderHooks::Instance().Initialize();
 
         // Find Source's D3D9 device
         auto sourceDevice = static_cast<IDirect3DDevice9Ex*>(FindD3D9Device());
