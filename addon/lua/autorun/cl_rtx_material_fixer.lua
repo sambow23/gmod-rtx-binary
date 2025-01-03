@@ -19,6 +19,11 @@ local function FixupGUIMaterial(mat, filepath)
 	mat:SetTexture( "$basetexture", blankmat:GetTexture("$basetexture") )
 end
 
+local function FixupParticleMaterial(mat, filepath)
+	print("[RTX Fixes] - Found and fixing particle material in " .. filepath)
+	mat:SetInt( "$additive", 1 )
+end
+
 -- Trying to fix these crash the game 
 local bannedmaterials = {
 	"materials/particle/warp3_warp_noz.vmt",
