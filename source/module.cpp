@@ -246,6 +246,8 @@ GMOD_MODULE_CLOSE() {
         
         RTXLightManager::Instance().Shutdown();
 
+        ModelRenderHooks::Instance().Shutdown();
+
         if (g_remix) {
             delete g_remix;
             g_remix = nullptr;

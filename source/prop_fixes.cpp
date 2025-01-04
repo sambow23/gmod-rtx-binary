@@ -1,21 +1,21 @@
-#include "GarrysMod/Lua/Interface.h"  
+#include "GarrysMod/Lua/Interface.h" 
 #include "e_utils.h"  
+#include "iclientrenderable.h"
 #include "materialsystem/imaterialsystem.h"
 #include "materialsystem/materialsystem_config.h"
 #include "interfaces/interfaces.h"  
 #include "prop_fixes.h"  
 
 using namespace GarrysMod::Lua;
- 
-
 
 Define_method_Hook(IMaterial*, R_StudioSetupSkinAndLighting, void*, IMatRenderContext* pRenderContext, int index, IMaterial** ppMaterials, int materialFlags,
-	void /*IClientRenderable*/* pClientRenderable, void* pColorMeshes, void* lighting)
-{
-	IMaterial* ret = R_StudioSetupSkinAndLighting_trampoline()(_this, pRenderContext, index, ppMaterials, materialFlags, pClientRenderable, pColorMeshes, lighting);
+	IClientRenderable* pClientRenderable, void* pColorMeshes, void* lighting)
+{ 
+	//IMaterial* pMaterial = ppMaterials[index];
+	IMaterial* pMaterial = R_StudioSetupSkinAndLighting_trampoline()(_this, pRenderContext, index, ppMaterials, materialFlags, pClientRenderable, pColorMeshes, lighting);
 	lighting = 0; // LIGHTING_HARDWARE 
-	materialFlags = 0;
-	return ret;
+	pColorMeshes = new ColorMeshInfo_t();
+	return pMaterial;
 }
 
 static StudioRenderConfig_t s_StudioRenderConfig;
