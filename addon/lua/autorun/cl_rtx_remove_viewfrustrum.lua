@@ -6,6 +6,10 @@ local cv_nearby_radius = CreateClientConVar("pvs_nearby_radius", "512", true, fa
 local cv_update_rate = CreateClientConVar("pvs_update_rate", "0.25", true, false, "How often to update PVS data (in seconds)")
 local cv_update_frequency = CreateClientConVar("frustum_update_frequency", "0.5", true, false, "How often to update moving entities (in seconds)")
 local cv_process_batch_size = CreateClientConVar("frustum_batch_size", "50", true, false, "How many entities to process per frame when refreshing")
+local cv_smart_radius = CreateClientConVar("pvs_smart_radius", "1", true, false, "Enable smart radius adjustment")
+local cv_min_radius = CreateClientConVar("pvs_min_radius", "512", true, false, "Minimum radius for nearby entity rendering")
+local cv_max_radius = CreateClientConVar("pvs_max_radius", "2048", true, false, "Maximum radius for nearby entity rendering")
+local cv_view_distance = CreateClientConVar("pvs_view_distance", "2048", true, false, "How far to extend radius in view direction")
 
 -- Cache variables
 local lastPVSUpdate = 0
@@ -18,6 +22,93 @@ local cached_bounds_size = cv_bounds_size:GetFloat()
 local cached_mins = Vector(-cached_bounds_size, -cached_bounds_size, -cached_bounds_size)
 local cached_maxs = Vector(cached_bounds_size, cached_bounds_size, cached_bounds_size)
 
+-- Cache for environment analysis
+local isOpenArea = false
+local currentRadius = cv_min_radius:GetFloat()
+local lastAreaCheck = 0
+local AREA_CHECK_INTERVAL = 0.5
+
+local function DrawDebugRadius()
+    if not cv_enable_pvs:GetBool() then return end
+    
+    local ply = LocalPlayer()
+    local pos = ply:GetPos()
+    local radius = GetSmartRadius()
+    
+    -- Draw current radius
+    render.DrawWireframeSphere(pos, radius, 32, 32, Color(0, 255, 0, 100))
+    
+    -- Draw view distance cone
+    local viewDir = ply:GetAimVector()
+    debugoverlay.Line(pos, pos + viewDir * cv_view_distance:GetFloat(), 0.1, Color(255, 255, 0))
+end
+
+if debug_draw_enabled then
+    hook.Add("PostDrawTranslucentRenderables", "DebugVisibilityRadius", DrawDebugRadius)
+end
+
+-- Function to check if we're in an open area
+local function IsInOpenArea()
+    local bsp = NikNaks.CurrentMap
+    if not bsp then return false end
+    
+    local ply = LocalPlayer()
+    if not IsValid(ply) then return false end
+    
+    local pos = ply:GetPos()
+    local upTrace = util.TraceLine({
+        start = pos,
+        endpos = pos + Vector(0, 0, 1000),
+        mask = MASK_SOLID
+    })
+    
+    local traces = {}
+    local traceCount = 8
+    for i = 1, traceCount do
+        local ang = Angle(0, (i - 1) * (360 / traceCount), 0)
+        local dir = ang:Forward()
+        
+        local tr = util.TraceLine({
+            start = pos,
+            endpos = pos + dir * 1000,
+            mask = MASK_SOLID
+        })
+        table.insert(traces, tr.Fraction)
+    end
+    
+    -- Calculate average open space
+    local avgSpace = 0
+    for _, frac in ipairs(traces) do
+        avgSpace = avgSpace + frac
+    end
+    avgSpace = avgSpace / traceCount
+    
+    -- Consider it an open area if:
+    -- 1. High ceiling (>500 units)
+    -- 2. Average horizontal space >70%
+    return upTrace.Fraction > 0.5 and avgSpace > 0.7
+end
+
+-- Function to get dynamic radius based on environment
+local function GetSmartRadius()
+    local bsp = NikNaks.CurrentMap
+    if not bsp or not cv_smart_radius:GetBool() then
+        return cv_nearby_radius:GetFloat()
+    end
+    
+    local curTime = CurTime()
+    if curTime > lastAreaCheck + AREA_CHECK_INTERVAL then
+        isOpenArea = IsInOpenArea()
+        lastAreaCheck = curTime
+        
+        -- Smoothly adjust radius
+        local targetRadius = isOpenArea and cv_max_radius:GetFloat() or cv_min_radius:GetFloat()
+        currentRadius = Lerp(0.1, currentRadius, targetRadius)
+    end
+    
+    return currentRadius
+end
+
 -- Helper function to update visibility data
 local function UpdateVisibilityData()
     local bsp = NikNaks.CurrentMap
@@ -27,14 +118,30 @@ local function UpdateVisibilityData()
     if not IsValid(ply) then return end
     
     local pos = ply:GetPos()
-    
-    -- Update current leaf
     currentLeaf = bsp:PointInLeaf(0, pos)
     
-    -- Update PVS data
     if cv_enable_pvs:GetBool() then
+        -- Get both PVS and PAS data
         cachedPVS = bsp:PVSForOrigin(pos)
-        cachedNearbyLeafs = bsp:SphereInLeafs(0, pos, cv_nearby_radius:GetFloat())
+        local pas = bsp:PASForOrigin(pos)
+        
+        -- Merge PVS and PAS data
+        for k, v in pairs(pas) do
+            if type(k) == "number" then
+                cachedPVS[k] = true
+            end
+        end
+        
+        -- Get nearby leafs with smart radius
+        local radius = GetSmartRadius()
+        cachedNearbyLeafs = bsp:SphereInLeafs(0, pos, radius)
+        
+        -- Add leafs in view direction
+        local viewDir = ply:GetAimVector()
+        local viewLeafs = bsp:LineInLeafs(0, pos, pos + viewDir * cv_view_distance:GetFloat())
+        for _, leaf in ipairs(viewLeafs) do
+            table.insert(cachedNearbyLeafs, leaf)
+        end
     else
         cachedPVS = nil
         cachedNearbyLeafs = nil
@@ -56,13 +163,23 @@ local function ShouldRenderEntity(ent)
     local entPos = ent:GetPos()
     local entLeaf = bsp:PointInLeaf(0, entPos)
     
-    -- Check if in PVS
+    -- Always render entities in PVS
     if cachedPVS[entLeaf.cluster] then return true end
     
     -- Check if in nearby leafs
     if cachedNearbyLeafs then
         for _, leaf in ipairs(cachedNearbyLeafs) do
             if leaf:GetIndex() == entLeaf:GetIndex() then
+                -- If in open area, check if entity is behind player
+                if isOpenArea then
+                    local ply = LocalPlayer()
+                    local toEnt = (entPos - ply:GetPos()):GetNormalized()
+                    local viewDir = ply:GetAimVector()
+                    local dotProduct = viewDir:Dot(toEnt)
+                    
+                    -- Render if entity is in front of player or close enough
+                    return dotProduct > -0.5 or ply:GetPos():DistToSqr(entPos) < (cv_min_radius:GetFloat() ^ 2)
+                end
                 return true
             end
         end
