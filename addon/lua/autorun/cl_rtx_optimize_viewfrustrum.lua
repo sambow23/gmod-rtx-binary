@@ -18,6 +18,11 @@ local cv_view_distance = CreateClientConVar("pvs_view_distance", "2048", true, f
 local cv_static_prop_enabled = CreateClientConVar("disable_frustum_culling_static_props", "1", true, false, "Include static props in frustum culling disable")
 local cv_static_prop_distance = CreateClientConVar("frustum_static_prop_distance", "8000", true, false, "Maximum distance to process static props")
 local cv_static_prop_batch = CreateClientConVar("frustum_static_prop_batch", "100", true, false, "How many static props to process per frame")
+local cv_indoor_mode = CreateClientConVar("pvs_indoor_mode", "1", true, false, "Enable optimizations for indoor environments")
+local cv_corridor_extend = CreateClientConVar("pvs_corridor_extend", "256", true, false, "How far to extend visibility in corridors")
+local cv_flicker_prevention = CreateClientConVar("pvs_flicker_prevention", "1", true, false, "Prevent light/object flickering in corridors")
+local cv_visibility_buffer = CreateClientConVar("pvs_visibility_buffer", "2", true, false, "Number of additional PVS clusters to keep visible")
+
 
 -- Function to check if the game is ready
 local function IsGameReady()
@@ -59,6 +64,8 @@ local static_prop_queue = {}
 local is_processing_props = false
 local last_distance_check = 0
 local DISTANCE_CHECK_INTERVAL = 1 -- Check distances every second
+
+
 
 local function DrawDebugRadius()
     if not cv_enable_pvs:GetBool() then return end
@@ -161,6 +168,52 @@ local function GetSmartRadius()
     return currentRadius
 end
 
+-- Function to detect if we're in a corridor
+local function IsInCorridor()
+    local ply = LocalPlayer()
+    if not IsValid(ply) then return false end
+    
+    local pos = ply:GetPos()
+    if not pos then return false end
+    
+    local traces = {}
+    local traceCount = 4
+    
+    -- Check horizontal space in four directions
+    for i = 1, traceCount do
+        local ang = Angle(0, (i - 1) * (360 / traceCount), 0)
+        local dir = ang:Forward()
+        
+        local tr = util.TraceLine({
+            start = pos,
+            endpos = pos + dir * 256,
+            mask = MASK_SOLID
+        })
+        
+        if tr then
+            table.insert(traces, tr.Fraction)
+        end
+    end
+    
+    -- Calculate average space
+    local avgSpace = 0
+    for _, frac in ipairs(traces) do
+        avgSpace = avgSpace + frac
+    end
+    avgSpace = avgSpace / #traces
+    
+    -- Consider it a corridor if average space is small but we have clear line of sight forward
+    local forwardTrace = util.TraceLine({
+        start = pos,
+        endpos = pos + ply:GetAimVector() * 512,
+        mask = MASK_SOLID
+    })
+    
+    if not forwardTrace then return false end
+    
+    return avgSpace < 0.4 and forwardTrace.Fraction > 0.7
+end
+
 -- Helper function to update visibility data
 local function UpdateVisibilityData()
     local bsp = NikNaks.CurrentMap
@@ -182,6 +235,39 @@ local function UpdateVisibilityData()
         local pvs = bsp:PVSForOrigin(pos)
         if not pvs then return end
         cachedPVS = pvs
+
+        -- If in indoor mode, handle corridors specially
+        if cv_indoor_mode:GetBool() and IsInCorridor() then
+            -- Extend PVS along corridor direction
+            local viewDir = ply:GetAimVector()
+            local extendDist = cv_corridor_extend:GetFloat()
+            
+            -- Get additional PVS clusters along the corridor
+            for i = 1, cv_visibility_buffer:GetInt() do
+                local extendedPos = pos + viewDir * (extendDist * i)
+                local extendedPVS = bsp:PVSForOrigin(extendedPos)
+                if extendedPVS then
+                    -- Merge PVS data
+                    for k, v in pairs(extendedPVS) do
+                        if type(k) == "number" then
+                            cachedPVS[k] = true
+                        end
+                    end
+                end
+            end
+            
+            -- If flicker prevention is enabled, add neighboring clusters
+            if cv_flicker_prevention:GetBool() then
+                local leaf = bsp:PointInLeaf(0, pos)
+                if leaf and leaf.neighbors then
+                    for _, neighborLeaf in ipairs(leaf.neighbors) do
+                        if neighborLeaf.cluster then
+                            cachedPVS[neighborLeaf.cluster] = true
+                        end
+                    end
+                end
+            end
+        end
 
         -- Get PAS data with safety check
         local pas = bsp:PASForOrigin(pos)
@@ -235,6 +321,27 @@ local function ShouldRenderEntity(ent)
     
     local entLeaf = bsp:PointInLeaf(0, entPos)
     if not entLeaf or not entLeaf.cluster then return true end
+    
+    -- Special handling for corridors
+    if cv_indoor_mode:GetBool() and IsInCorridor() then
+        local ply = LocalPlayer()
+        if not IsValid(ply) then return true end
+        
+        local plyPos = ply:GetPos()
+        if not plyPos then return true end
+        
+        local viewDir = ply:GetAimVector()
+        if not viewDir then return true end
+        
+        -- Check if entity is in the general direction we're looking
+        local toEnt = (entPos - plyPos):GetNormalized()
+        local dotProduct = viewDir:Dot(toEnt)
+        
+        -- More lenient dot product check in corridors
+        if dotProduct > -0.7 then
+            return true
+        end
+    end
     
     -- Always render entities in PVS
     if cachedPVS[entLeaf.cluster] then return true end
