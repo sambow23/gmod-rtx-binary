@@ -22,7 +22,13 @@ local cv_indoor_mode = CreateClientConVar("pvs_indoor_mode", "1", true, false, "
 local cv_corridor_extend = CreateClientConVar("pvs_corridor_extend", "256", true, false, "How far to extend visibility in corridors")
 local cv_flicker_prevention = CreateClientConVar("pvs_flicker_prevention", "1", true, false, "Prevent light/object flickering in corridors")
 local cv_visibility_buffer = CreateClientConVar("pvs_visibility_buffer", "2", true, false, "Number of additional PVS clusters to keep visible")
+local cv_light_render_distance = CreateClientConVar("frustum_light_distance", "2048", true, false, "Maximum distance to render lights")
+local cv_light_updater_bounds = CreateClientConVar("frustum_light_updater_bounds", "16", true, false, "Size of render bounds for light updater entities")
 
+local LIGHT_UPDATER_MODELS = {
+    ["models/hunter/plates/plate.mdl"] = true,
+    ["models/hunter/blocks/cube025x025x025.mdl"] = true
+}
 
 -- Function to check if the game is ready
 local function IsGameReady()
@@ -65,6 +71,31 @@ local is_processing_props = false
 local last_distance_check = 0
 local DISTANCE_CHECK_INTERVAL = 1 -- Check distances every second
 
+-- Helper function to check for RTX light updater entities
+local function IsRTXLightUpdater(ent)
+    if not IsValid(ent) then return false end
+    local class = ent:GetClass()
+    return class == "rtx_lightupdater" or class == "rtx_lightupdatermanager"
+end
+
+-- Helper function to check if entity is a light
+local function IsLight(ent)
+    if not IsValid(ent) then return false end
+    
+    -- Check for light updater models
+    local model = ent:GetModel()
+    if model and LIGHT_UPDATER_MODELS[model] then
+        return true
+    end
+    
+    local class = ent:GetClass()
+    return class == "light" or 
+           class == "light_dynamic" or 
+           class == "light_spot" or 
+           class == "light_environment" or 
+           class == "light_point" or
+           string.find(class, "light") ~= nil
+end
 
 
 local function DrawDebugRadius()
@@ -308,7 +339,22 @@ end
 local function ShouldRenderEntity(ent)
     if not cv_enable_pvs:GetBool() then return true end
     if not IsValid(ent) then return false end
+
+    -- Always render light updater models
+    local model = ent:GetModel()
+    if model and LIGHT_UPDATER_MODELS[model] then
+        return true
+    end
     
+    -- Always render light updater models and entities
+    local model = ent:GetModel()
+    if model and LIGHT_UPDATER_MODELS[model] or 
+       ent:GetClass() == "rtx_lightupdater" or 
+       ent:GetClass() == "rtx_lightupdatermanager" then
+        return true
+    end
+    
+    -- Rest of the existing visibility checks
     local bsp = NikNaks.CurrentMap
     if not bsp or not cachedPVS then return true end
     
@@ -375,13 +421,42 @@ local function ShouldRenderEntity(ent)
     return false
 end
 
--- Modified SetHugeRenderBounds function
 local function SetHugeRenderBounds(ent)
     if not IsValid(ent) then return end
     if not ent.SetRenderBounds then return end
     
     -- Only set bounds for visible entities
     if ent:GetNoDraw() then return end
+    
+    -- Special handling for RTX light updaters
+    if IsRTXLightUpdater(ent) then
+        local bounds_size = cv_light_updater_bounds:GetFloat()
+        local bounds = Vector(bounds_size, bounds_size, bounds_size)
+        ent:SetRenderBounds(-bounds, bounds)
+        return
+    end
+    
+    -- Special handling for light updater models and entities
+    local model = ent:GetModel()
+    if model and LIGHT_UPDATER_MODELS[model] or 
+       ent:GetClass() == "rtx_lightupdater" or 
+       ent:GetClass() == "rtx_lightupdatermanager" then
+        -- Use extremely large bounds for light updaters
+        local huge_bounds = Vector(16384, 16384, 16384)  -- Maximum possible size
+        ent:SetRenderBounds(-huge_bounds, huge_bounds)
+        -- Force disable culling for these entities
+        ent:DisableMatrix("RenderMultiply") -- Reset any render transformations
+        ent:SetNoDraw(false) -- Ensure drawing is enabled
+        return
+    end
+    
+    -- Handle regular lights
+    if IsLight(ent) then
+        local light_distance = cv_light_render_distance:GetFloat()
+        local light_bounds = Vector(light_distance, light_distance, light_distance)
+        ent:SetRenderBounds(-light_bounds, light_bounds)
+        return
+    end
     
     -- Skip static props if disabled
     if ent.IsStaticProp and not cv_static_prop_enabled:GetBool() then return end
@@ -614,10 +689,26 @@ hook.Add("Think", "UpdateRenderBounds", function()
     
     next_update = curTime + cv_update_frequency:GetFloat()
     
+    -- Process RTX light updaters first
+    for _, ent in ipairs(ents.FindByClass("rtx_lightupdater*")) do
+        if IsValid(ent) then
+            SetHugeRenderBounds(ent)
+        end
+    end
+    
+    -- Process regular lights
+    for _, ent in ipairs(ents.FindByClass("light*")) do
+        if IsValid(ent) and not IsRTXLightUpdater(ent) then
+            SetHugeRenderBounds(ent)
+        end
+    end
+    
     -- Process dynamic entities
     local dynamic_entities = {}
     for _, ent in ipairs(ents.GetAll()) do
         if IsValid(ent) and 
+           not IsLight(ent) and  -- Skip lights as they're handled separately
+           not IsRTXLightUpdater(ent) and -- Skip RTX light updaters
            ent:GetMoveType() != MOVETYPE_NONE and
            ent:GetBoneCount() and ent:GetBoneCount() > 0 then
             table.insert(dynamic_entities, ent)
@@ -636,6 +727,84 @@ hook.Add("Think", "UpdateRenderBounds", function()
     end
     
     QueueEntitiesForProcessing(dynamic_entities)
+end)
+
+-- Hook to catch entity spawns immediately
+hook.Add("OnEntityCreated", "SetupLightUpdaters", function(ent)
+    if not IsValid(ent) then return end
+    
+    -- Immediate check for light updater
+    local model = ent:GetModel()
+    if model and LIGHT_UPDATER_MODELS[model] or 
+       ent:GetClass() == "rtx_lightupdater" or 
+       ent:GetClass() == "rtx_lightupdatermanager" then
+        
+        -- Set huge bounds immediately and on next frame
+        local huge_bounds = Vector(16384, 16384, 16384)
+        ent:SetRenderBounds(-huge_bounds, huge_bounds)
+        
+        -- Also set them again next frame to ensure they stick
+        timer.Simple(0, function()
+            if IsValid(ent) then
+                ent:SetRenderBounds(-huge_bounds, huge_bounds)
+                ent:DisableMatrix("RenderMultiply")
+                ent:SetNoDraw(false)
+            end
+        end)
+    end
+end)
+
+-- Think hook specifically for light updaters
+hook.Add("Think", "UpdateLightUpdaters", function()
+    -- Update light updater entities every frame
+    for _, ent in ipairs(ents.FindByClass("rtx_lightupdater")) do
+        if IsValid(ent) then
+            local huge_bounds = Vector(16384, 16384, 16384)
+            ent:SetRenderBounds(-huge_bounds, huge_bounds)
+            ent:DisableMatrix("RenderMultiply")
+            ent:SetNoDraw(false)
+        end
+    end
+    
+    for _, ent in ipairs(ents.FindByClass("rtx_lightupdatermanager")) do
+        if IsValid(ent) then
+            local huge_bounds = Vector(16384, 16384, 16384)
+            ent:SetRenderBounds(-huge_bounds, huge_bounds)
+            ent:DisableMatrix("RenderMultiply")
+            ent:SetNoDraw(false)
+        end
+    end
+end)
+
+-- Force override the entity's Draw function
+hook.Add("InitPostEntity", "SetupLightUpdaterOverrides", function()
+    local lightupdater = scripted_ents.GetStored("rtx_lightupdater")
+    if lightupdater and lightupdater.t then
+        local oldDraw = lightupdater.t.Draw
+        lightupdater.t.Draw = function(self)
+            local huge_bounds = Vector(16384, 16384, 16384)
+            self:SetRenderBounds(-huge_bounds, huge_bounds)
+            if oldDraw then
+                oldDraw(self)
+            else
+                self:DrawModel()
+            end
+        end
+    end
+    
+    local manager = scripted_ents.GetStored("rtx_lightupdatermanager")
+    if manager and manager.t then
+        local oldDraw = manager.t.Draw
+        manager.t.Draw = function(self)
+            local huge_bounds = Vector(16384, 16384, 16384)
+            self:SetRenderBounds(-huge_bounds, huge_bounds)
+            if oldDraw then
+                oldDraw(self)
+            else
+                self:DrawModel()
+            end
+        end
+    end
 end)
 
 hook.Add("InitPostEntity", "InitializeStaticProps", function()
@@ -660,7 +829,7 @@ hook.Add("InitPostEntity", "InitializeStaticProps", function()
     end
 end)
 
--- Add a hook to reinitialize when the player spawns
+-- Hook to reinitialize when the player spawns
 hook.Add("PlayerSpawn", "ReinitializeStaticProps", function(ply)
     if not LocalPlayer then return end
     if ply == LocalPlayer() then
@@ -690,6 +859,16 @@ hook.Add("InitPostEntity", "SetupRenderBoundsOverride", function()
             return originalSetupBones(self)
         end
     end
+end)
+
+hook.Add("OnEntityCreated", "HandleRTXLightUpdaters", function(ent)
+    if not IsValid(ent) then return end
+    
+    timer.Simple(0, function()
+        if IsValid(ent) and IsRTXLightUpdater(ent) then
+            SetHugeRenderBounds(ent)
+        end
+    end)
 end)
 
 -- Add command to refresh static props
@@ -763,4 +942,27 @@ concommand.Add("debug_static_props", function()
         end
     end
     print("Props in range: " .. propsInRange)
+end)
+
+concommand.Add("set_light_render_distance", function(ply, cmd, args)
+    if not args[1] then 
+        print("Current light render distance: " .. cv_light_render_distance:GetFloat())
+        return
+    end
+    
+    local new_size = tonumber(args[1])
+    if not new_size then
+        print("Invalid distance value. Please use a number.")
+        return
+    end
+    
+    cv_light_render_distance:SetFloat(new_size)
+    print("Set light render distance to: " .. new_size)
+    
+    -- Update all lights
+    for _, ent in ipairs(ents.FindByClass("light*")) do
+        if IsValid(ent) then
+            SetHugeRenderBounds(ent)
+        end
+    end
 end)
