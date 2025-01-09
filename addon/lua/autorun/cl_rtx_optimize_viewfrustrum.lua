@@ -29,6 +29,7 @@ local cv_freq_close = CreateClientConVar("frustum_freq_close", "0.25", true, fal
 local cv_freq_medium = CreateClientConVar("frustum_freq_medium", "0.5", true, false, "Update frequency for medium distance entities")
 local cv_freq_far = CreateClientConVar("frustum_freq_far", "1.0", true, false, "Update frequency for far entities")
 local cv_freq_very_far = CreateClientConVar("frustum_freq_very_far", "2.0", true, false, "Update frequency for very far entities")
+local cv_light_updater_render_distance = CreateClientConVar("frustum_light_updater_distance", "8192", true, false, "Maximum render distance for RTX light updaters")
 
 
 local LIGHT_UPDATER_MODELS = {
@@ -483,6 +484,49 @@ local function IsInCorridor()
     return avgSpace < 0.4 and forwardTrace.Fraction > 0.7
 end
 
+
+-- Helper function to safely get PVS data
+local function SafeGetPVS(bsp, pos)
+    if not bsp or not pos then return nil end
+    
+    local success, result = pcall(function()
+        return bsp:PVSForOrigin(pos)
+    end)
+    
+    if success and result then
+        return result
+    end
+    return nil
+end
+
+-- Helper function to safely get PAS data
+local function SafeGetPAS(bsp, pos)
+    if not bsp or not pos then return nil end
+    
+    local success, result = pcall(function()
+        return bsp:PASForOrigin(pos)
+    end)
+    
+    if success and result then
+        return result
+    end
+    return nil
+end
+
+-- Helper function to safely get leaf data
+local function SafeGetLeaf(bsp, pos)
+    if not bsp or not pos then return nil end
+    
+    local success, result = pcall(function()
+        return bsp:PointInLeaf(0, pos)
+    end)
+    
+    if success and result then
+        return result
+    end
+    return nil
+end
+
 -- Helper function to update visibility data
 local function UpdateVisibilityData()
     local bsp = NikNaks.CurrentMap
@@ -515,87 +559,92 @@ local function UpdateVisibilityData()
     end
     
     -- Get current leaf with safety check
-    local leaf = bsp:PointInLeaf(0, pos)
-    if not leaf then return end
+    local leaf = SafeGetLeaf(bsp, pos)
+    if not leaf then
+        -- If we can't get leaf data, use a fallback system
+        currentLeaf = nil
+        PVSCache.leaf = nil
+        PVSCache.data = nil
+        cachedPVS = nil
+        return
+    end
+    
     currentLeaf = leaf
     PVSCache.leaf = leaf
     
     if cv_enable_pvs:GetBool() then
         -- Get PVS data with safety check
-        local pvs = bsp:PVSForOrigin(pos)
-        if not pvs then return end
-        
-        -- Cache the new PVS data
-        PVSCache.data = pvs
-        cachedPVS = pvs
+        local pvs = SafeGetPVS(bsp, pos)
+        if not pvs then
+            -- If PVS data isn't available, fall back to distance-based visibility
+            PVSCache.data = nil
+            cachedPVS = nil
+        else
+            PVSCache.data = pvs
+            cachedPVS = pvs
 
-        -- If in indoor mode, handle corridors specially
-        if cv_indoor_mode:GetBool() and IsInCorridor() then
-            -- Extend PVS along corridor direction
-            local viewDir = ply:GetAimVector()
-            local extendDist = cv_corridor_extend:GetFloat()
-            
-            -- Get additional PVS clusters along the corridor
-            for i = 1, cv_visibility_buffer:GetInt() do
-                local extendedPos = pos + viewDir * (extendDist * i)
-                local extendedPVS = bsp:PVSForOrigin(extendedPos)
-                if extendedPVS then
-                    -- Merge PVS data
-                    for k, v in pairs(extendedPVS) do
-                        if type(k) == "number" then
-                            PVSCache.data[k] = true
-                            cachedPVS[k] = true
+            -- If in indoor mode, handle corridors specially
+            if cv_indoor_mode:GetBool() and IsInCorridor() then
+                -- Wrap corridor handling in pcall
+                pcall(function()
+                    local viewDir = ply:GetAimVector()
+                    local extendDist = cv_corridor_extend:GetFloat()
+                    
+                    for i = 1, cv_visibility_buffer:GetInt() do
+                        local extendedPos = pos + viewDir * (extendDist * i)
+                        local extendedPVS = SafeGetPVS(bsp, extendedPos)
+                        if extendedPVS then
+                            for k, v in pairs(extendedPVS) do
+                                if type(k) == "number" then
+                                    PVSCache.data[k] = true
+                                    cachedPVS[k] = true
+                                end
+                            end
                         end
                     end
-                end
+                end)
             end
-            
-            -- If flicker prevention is enabled, add neighboring clusters
-            if cv_flicker_prevention:GetBool() then
-                local leaf = bsp:PointInLeaf(0, pos)
-                if leaf and leaf.neighbors then
-                    for _, neighborLeaf in ipairs(leaf.neighbors) do
-                        if neighborLeaf.cluster then
-                            PVSCache.data[neighborLeaf.cluster] = true
-                            cachedPVS[neighborLeaf.cluster] = true
-                        end
+
+            -- Get PAS data with safety check
+            local pas = SafeGetPAS(bsp, pos)
+            if pas then
+                for k, v in pairs(pas) do
+                    if type(k) == "number" then
+                        PVSCache.data[k] = true
+                        cachedPVS[k] = true
                     end
                 end
             end
         end
-
-        -- Get PAS data with safety check
-        local pas = bsp:PASForOrigin(pos)
-        if pas then
-            -- Merge PVS and PAS data
-            for k, v in pairs(pas) do
-                if type(k) == "number" then
-                    PVSCache.data[k] = true
-                    cachedPVS[k] = true
-                end
-            end
-        end
         
-        -- Get nearby leafs with smart radius
-        local radius = GetSmartRadius()
-        local nearbyLeafs = bsp:SphereInLeafs(0, pos, radius)
-        if nearbyLeafs then
+        -- Safely get nearby leafs
+        local success, nearbyLeafs = pcall(function()
+            local radius = GetSmartRadius()
+            return bsp:SphereInLeafs(0, pos, radius)
+        end)
+        
+        if success and nearbyLeafs then
             PVSCache.nearbyLeafs = nearbyLeafs
             cachedNearbyLeafs = nearbyLeafs
             
-            -- Add leafs in view direction
-            local viewDir = ply:GetAimVector()
-            if viewDir then
-                local viewLeafs = bsp:LineInLeafs(0, pos, pos + viewDir * cv_view_distance:GetFloat())
-                if viewLeafs then
-                    for _, leaf in ipairs(viewLeafs) do
-                        if leaf then
-                            table.insert(PVSCache.nearbyLeafs, leaf)
-                            table.insert(cachedNearbyLeafs, leaf)
+            -- Safely add view direction leafs
+            pcall(function()
+                local viewDir = ply:GetAimVector()
+                if viewDir then
+                    local viewLeafs = bsp:LineInLeafs(0, pos, pos + viewDir * cv_view_distance:GetFloat())
+                    if viewLeafs then
+                        for _, leaf in ipairs(viewLeafs) do
+                            if leaf then
+                                table.insert(PVSCache.nearbyLeafs, leaf)
+                                table.insert(cachedNearbyLeafs, leaf)
+                            end
                         end
                     end
                 end
-            end
+            end)
+        else
+            PVSCache.nearbyLeafs = nil
+            cachedNearbyLeafs = nil
         end
     else
         PVSCache.data = nil
@@ -608,6 +657,13 @@ local function UpdateVisibilityData()
     PVSCache.timestamp = curTime
     LastPVSPosition = pos
 end
+
+-- Also modify the timer that uses this function to handle errors
+timer.Create("ProcessBatchTimer", 0, 1, function()
+    pcall(function()
+        ProcessBatch()
+    end)
+end)
 
 -- Helper function to check if entity should be rendered
 local function ShouldRenderEntity(ent)
@@ -706,12 +762,13 @@ local function SetHugeRenderBounds(ent)
     
     -- Special handling for light updater models and entities
     local model = ent:GetModel()
-    if model and LIGHT_UPDATER_MODELS[model] or 
-       ent:GetClass() == "rtx_lightupdater" or 
+    if model and LIGHT_UPDATER_MODELS[model] or
+       ent:GetClass() == "rtx_lightupdater" or
        ent:GetClass() == "rtx_lightupdatermanager" then
-        -- Use extremely large bounds for light updaters
-        local huge_bounds = Vector(16384, 16384, 16384)  -- Maximum possible size
-        ent:SetRenderBounds(-huge_bounds, huge_bounds)
+        -- Use ConVar-controlled bounds for light updaters
+        local bounds_size = cv_light_updater_render_distance:GetFloat()
+        local updater_bounds = Vector(bounds_size, bounds_size, bounds_size)
+        ent:SetRenderBounds(-updater_bounds, updater_bounds)
         -- Force disable culling for these entities
         ent:DisableMatrix("RenderMultiply") -- Reset any render transformations
         ent:SetNoDraw(false) -- Ensure drawing is enabled
@@ -1341,5 +1398,35 @@ concommand.Add("set_batch_parameters", function(ply, cmd, args)
         print("Current settings:")
         print("Time limit:", BatchProcessor.frameTimeLimit * 1000, "ms")
         print("Max per frame:", BatchProcessor.maxPerFrame)
+    end
+end)
+
+concommand.Add("set_light_updater_distance", function(ply, cmd, args)
+    if not args[1] then 
+        print("Current light updater render distance: " .. cv_light_updater_render_distance:GetFloat())
+        return
+    end
+    
+    local new_size = tonumber(args[1])
+    if not new_size then
+        print("Invalid distance value. Please use a number.")
+        return
+    end
+    
+    cv_light_updater_render_distance:SetFloat(new_size)
+    print("Set light updater render distance to: " .. new_size)
+    
+    -- Update all light updaters
+    for _, ent in ipairs(ents.FindByClass("rtx_lightupdater*")) do
+        if IsValid(ent) then
+            SetHugeRenderBounds(ent)
+        end
+    end
+    
+    -- Update entities with light updater models
+    for _, ent in ipairs(ents.GetAll()) do
+        if IsValid(ent) and ent:GetModel() and LIGHT_UPDATER_MODELS[ent:GetModel()] then
+            SetHugeRenderBounds(ent)
+        end
     end
 end)
