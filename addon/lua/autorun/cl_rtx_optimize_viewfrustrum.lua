@@ -30,7 +30,9 @@ local cv_freq_medium = CreateClientConVar("frustum_freq_medium", "0.5", true, fa
 local cv_freq_far = CreateClientConVar("frustum_freq_far", "1.0", true, false, "Update frequency for far entities")
 local cv_freq_very_far = CreateClientConVar("frustum_freq_very_far", "2.0", true, false, "Update frequency for very far entities")
 local cv_light_updater_render_distance = CreateClientConVar("frustum_light_updater_distance", "8192", true, false, "Maximum render distance for RTX light updaters")
-
+local cv_open_area_optimization = CreateClientConVar("frustum_open_area_opt", "1", true, false, "Enable open area optimizations")
+local cv_open_update_frequency = CreateClientConVar("frustum_open_update_freq", "1.0", true, false, "Update frequency in open areas")
+local cv_open_batch_size = CreateClientConVar("frustum_open_batch_size", "100", true, false, "Batch size for open areas")
 
 local LIGHT_UPDATER_MODELS = {
     ["models/hunter/plates/plate.mdl"] = true,
@@ -80,6 +82,15 @@ local EntityUpdateFrequencies = {
     [1024 * 1024] = 0.5,  -- Medium distance (1024 units): update occasionally
     [2048 * 2048] = 1.0,  -- Far entities (2048 units): update rarely
     [4096 * 4096] = 2.0   -- Very far entities (4096+ units): update very rarely
+}
+
+-- Check if we're in an open area
+local openAreaCache = {
+    isOpen = false,
+    lastCheck = 0,
+    position = Vector(0, 0, 0),
+    checkDistance = 1024, -- Only recheck if moved this far
+    checkInterval = 1 -- Check every second
 }
 
 -- PVS Cache
@@ -195,13 +206,24 @@ end
 local function ShouldUpdateEntity(ent)
     if not IsValid(ent) then return false end
     
-    -- Always update light updaters and specific entities
+    -- Always update important entities
     if IsRTXLightUpdater(ent) or IsLight(ent) then
         return true
     end
     
     local ply = LocalPlayer()
     if not IsValid(ply) then return false end
+    
+    -- If we're in an open area, use simplified checks
+    if cv_open_area_optimization:GetBool() and openAreaCache.isOpen then
+        local entPos = ent:GetPos()
+        local playerPos = ply:GetPos()
+        if not entPos or not playerPos then return false end
+        
+        -- Use a simplified distance check for open areas
+        local distSqr = entPos:DistToSqr(playerPos)
+        return distSqr <= (cv_max_radius:GetFloat() * cv_max_radius:GetFloat())
+    end
     
     local entPos = ent:GetPos()
     local playerPos = ply:GetPos()
@@ -277,6 +299,10 @@ function BatchProcessor:ProcessBatch()
     local startTime = SysTime()
     local processed = 0
     local currentFrame = FrameNumber()
+    
+    -- Use different processing parameters for open areas
+    local maxPerFrame = (openAreaCache and openAreaCache.isOpen) and cv_open_batch_size:GetInt() or self.maxPerFrame
+    local frameTimeLimit = (openAreaCache and openAreaCache.isOpen) and 0.004 or self.frameTimeLimit -- Allow more time in open areas
     
     -- Reset processed count on new frame
     if currentFrame ~= self.lastFrame then
@@ -356,60 +382,71 @@ if debug_draw_enabled then
     hook.Add("PostDrawTranslucentRenderables", "DebugVisibilityRadius", DrawDebugRadius)
 end
 
--- Function to check if we're in an open area
 local function IsInOpenArea()
-    local bsp = NikNaks.CurrentMap
-    if not bsp then return false end
-    
     local ply = LocalPlayer()
     if not IsValid(ply) then return false end
     
     local pos = ply:GetPos()
-    if not pos then return false end  -- Add position check
+    if not pos then return false end
     
-    local upTrace = util.TraceLine({
-        start = pos,
-        endpos = pos + Vector(0, 0, 1000),
-        mask = MASK_SOLID
-    })
+    local curTime = CurTime()
     
-    -- Ensure upTrace is valid
-    if not upTrace then return false end
+    -- Use cached result if we haven't moved far and cache isn't expired
+    if curTime - openAreaCache.lastCheck < openAreaCache.checkInterval and 
+       pos:DistToSqr(openAreaCache.position) < (openAreaCache.checkDistance * openAreaCache.checkDistance) then
+        return openAreaCache.isOpen
+    end
     
-    local traces = {}
-    local traceCount = 8
-    for i = 1, traceCount do
-        local ang = Angle(0, (i - 1) * (360 / traceCount), 0)
-        local dir = ang:Forward()
-        
-        local tr = util.TraceLine({
+    -- Wrap the trace in pcall to catch any errors
+    local success, upTrace = pcall(function()
+        return util.TraceLine({
             start = pos,
-            endpos = pos + dir * 1000,
+            endpos = pos + Vector(0, 0, 2000),
             mask = MASK_SOLID
         })
+    end)
+    
+    if not success or not upTrace then 
+        -- If trace failed, cache the failure and return false
+        openAreaCache.isOpen = false
+        openAreaCache.lastCheck = curTime
+        openAreaCache.position = pos
+        return false 
+    end
+
+    local result = false
+    
+    if upTrace.Fraction > 0.9 then -- If we can see far up
+        local openDirections = 0
+        local traceCount = 8
         
-        -- Add null check for trace result
-        if tr then
-            table.insert(traces, tr.Fraction)
-        else
-            table.insert(traces, 0)  -- Use 0 as fallback if trace fails
+        for i = 1, traceCount do
+            local ang = Angle(0, (i - 1) * (360 / traceCount), 0)
+            local dir = ang:Forward()
+            
+            -- Wrap horizontal traces in pcall as well
+            local trSuccess, tr = pcall(function()
+                return util.TraceLine({
+                    start = pos,
+                    endpos = pos + dir * 2000,
+                    mask = MASK_SOLID
+                })
+            end)
+            
+            if trSuccess and tr and tr.Fraction > 0.75 then
+                openDirections = openDirections + 1
+            end
         end
+        
+        result = (openDirections / traceCount) > 0.7
     end
     
-    -- Guard against empty traces table
-    if #traces == 0 then return false end
+    -- Cache the result
+    openAreaCache.isOpen = result
+    openAreaCache.lastCheck = curTime
+    openAreaCache.position = pos
     
-    -- Calculate average open space
-    local avgSpace = 0
-    for _, frac in ipairs(traces) do
-        avgSpace = avgSpace + frac
-    end
-    avgSpace = avgSpace / #traces
-    
-    -- Consider it an open area if:
-    -- 1. High ceiling (>500 units)
-    -- 2. Average horizontal space >70%
-    return upTrace.Fraction > 0.5 and avgSpace > 0.7
+    return result
 end
 
 -- Function to get dynamic radius based on environment
@@ -529,11 +566,32 @@ end
 
 -- Helper function to update visibility data
 local function UpdateVisibilityData()
-    local bsp = NikNaks.CurrentMap
-    if not bsp then return end
+    if not cv_open_area_optimization:GetBool() then
+        return
+    end
     
     local ply = LocalPlayer()
     if not IsValid(ply) then return end
+    
+    -- If we're in an open area, use simplified visibility
+    if IsInOpenArea() then
+        -- Clear PVS data since we don't need it in open areas
+        PVSCache.data = nil
+        cachedPVS = nil
+        
+        -- Use a simple distance-based system instead
+        local pos = ply:GetPos()
+        local viewDir = ply:GetAimVector()
+        
+        -- Create a simplified visibility set based on distance and view direction
+        PVSCache.nearbyLeafs = {}
+        cachedNearbyLeafs = {}
+        
+        -- Update timestamps
+        PVSCache.timestamp = CurTime()
+        LastPVSPosition = pos
+        return
+    end
     
     local pos = ply:GetPos()
     if not pos then return end
@@ -1429,4 +1487,17 @@ concommand.Add("set_light_updater_distance", function(ply, cmd, args)
             SetHugeRenderBounds(ent)
         end
     end
+end)
+
+-- Add a debug command to check open area status
+concommand.Add("debug_open_area", function()
+    local ply = LocalPlayer()
+    if not IsValid(ply) then return end
+    
+    print("\nOpen Area Debug Info:")
+    print("Is Open Area:", openAreaCache.isOpen)
+    print("Last Check:", CurTime() - openAreaCache.lastCheck, "seconds ago")
+    print("Check Interval:", openAreaCache.checkInterval, "seconds")
+    print("Check Distance:", openAreaCache.checkDistance, "units")
+    print("Optimization Enabled:", cv_open_area_optimization:GetBool())
 end)
