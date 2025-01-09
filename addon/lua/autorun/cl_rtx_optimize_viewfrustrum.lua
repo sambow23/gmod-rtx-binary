@@ -74,11 +74,16 @@ local function IsInOpenArea()
     if not IsValid(ply) then return false end
     
     local pos = ply:GetPos()
+    if not pos then return false end  -- Add position check
+    
     local upTrace = util.TraceLine({
         start = pos,
         endpos = pos + Vector(0, 0, 1000),
         mask = MASK_SOLID
     })
+    
+    -- Ensure upTrace is valid
+    if not upTrace then return false end
     
     local traces = {}
     local traceCount = 8
@@ -91,15 +96,24 @@ local function IsInOpenArea()
             endpos = pos + dir * 1000,
             mask = MASK_SOLID
         })
-        table.insert(traces, tr.Fraction)
+        
+        -- Add null check for trace result
+        if tr then
+            table.insert(traces, tr.Fraction)
+        else
+            table.insert(traces, 0)  -- Use 0 as fallback if trace fails
+        end
     end
+    
+    -- Guard against empty traces table
+    if #traces == 0 then return false end
     
     -- Calculate average open space
     local avgSpace = 0
     for _, frac in ipairs(traces) do
         avgSpace = avgSpace + frac
     end
-    avgSpace = avgSpace / traceCount
+    avgSpace = avgSpace / #traces
     
     -- Consider it an open area if:
     -- 1. High ceiling (>500 units)
@@ -114,9 +128,15 @@ local function GetSmartRadius()
         return cv_nearby_radius:GetFloat()
     end
     
+    -- Add player validity check
+    local ply = LocalPlayer()
+    if not IsValid(ply) then return cv_nearby_radius:GetFloat() end
+    
     local curTime = CurTime()
     if curTime > lastAreaCheck + AREA_CHECK_INTERVAL then
-        isOpenArea = IsInOpenArea()
+        -- Add pcall to catch any errors in IsInOpenArea
+        local success, result = pcall(IsInOpenArea)
+        isOpenArea = success and result or false
         lastAreaCheck = curTime
         
         -- Smoothly adjust radius
@@ -341,12 +361,14 @@ local function ProcessBatch()
     for i = 1, batch_size do
         local ent = table.remove(processing_queue, 1)
         if IsValid(ent) then
-            SetHugeRenderBounds(ent)
+            -- Add pcall to catch any errors in SetHugeRenderBounds
+            pcall(SetHugeRenderBounds, ent)
         end
     end
     
     if #processing_queue > 0 then
-        timer.Simple(0, ProcessBatch)
+        -- Use CreateTimer instead of timer.Simple for better error handling
+        timer.Create("ProcessBatchTimer", 0, 1, ProcessBatch)
     else
         is_processing = false
     end
