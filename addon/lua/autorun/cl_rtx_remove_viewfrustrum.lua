@@ -1,18 +1,77 @@
+-- ConVars
 local cv_disable_culling = CreateClientConVar("disable_frustum_culling", "1", true, false, "Disable frustum culling")
 local cv_bounds_size = CreateClientConVar("frustum_bounds_size", "10000", true, false, "Size of render bounds when culling is disabled (default: 1000)")
+local cv_enable_pvs = CreateClientConVar("enable_pvs_culling", "1", true, false, "Enable PVS-based culling")
+local cv_nearby_radius = CreateClientConVar("pvs_nearby_radius", "512", true, false, "Radius for nearby entity rendering")
+local cv_update_rate = CreateClientConVar("pvs_update_rate", "0.25", true, false, "How often to update PVS data (in seconds)")
 local cv_update_frequency = CreateClientConVar("frustum_update_frequency", "0.5", true, false, "How often to update moving entities (in seconds)")
 local cv_process_batch_size = CreateClientConVar("frustum_batch_size", "50", true, false, "How many entities to process per frame when refreshing")
 
--- Cache vectors to avoid creating new ones constantly
+-- Cache variables
+local lastPVSUpdate = 0
+local cachedPVS = nil
+local cachedNearbyLeafs = nil
+local currentLeaf = nil
+local processing_queue = {}
+local is_processing = false
 local cached_bounds_size = cv_bounds_size:GetFloat()
 local cached_mins = Vector(-cached_bounds_size, -cached_bounds_size, -cached_bounds_size)
 local cached_maxs = Vector(cached_bounds_size, cached_bounds_size, cached_bounds_size)
 
--- Processing queue for batch operations
-local processing_queue = {}
-local is_processing = false
+-- Helper function to update visibility data
+local function UpdateVisibilityData()
+    local bsp = NikNaks.CurrentMap
+    if not bsp then return end
+    
+    local ply = LocalPlayer()
+    if not IsValid(ply) then return end
+    
+    local pos = ply:GetPos()
+    
+    -- Update current leaf
+    currentLeaf = bsp:PointInLeaf(0, pos)
+    
+    -- Update PVS data
+    if cv_enable_pvs:GetBool() then
+        cachedPVS = bsp:PVSForOrigin(pos)
+        cachedNearbyLeafs = bsp:SphereInLeafs(0, pos, cv_nearby_radius:GetFloat())
+    else
+        cachedPVS = nil
+        cachedNearbyLeafs = nil
+    end
+end
 
--- Helper function to safely set render bounds
+-- Helper function to check if entity should be rendered
+local function ShouldRenderEntity(ent)
+    if not cv_enable_pvs:GetBool() then return true end
+    if not IsValid(ent) then return false end
+    
+    local bsp = NikNaks.CurrentMap
+    if not bsp or not cachedPVS then return true end
+    
+    -- Always render if culling is disabled
+    if not cv_disable_culling:GetBool() then return true end
+    
+    -- Get entity's leaf
+    local entPos = ent:GetPos()
+    local entLeaf = bsp:PointInLeaf(0, entPos)
+    
+    -- Check if in PVS
+    if cachedPVS[entLeaf.cluster] then return true end
+    
+    -- Check if in nearby leafs
+    if cachedNearbyLeafs then
+        for _, leaf in ipairs(cachedNearbyLeafs) do
+            if leaf:GetIndex() == entLeaf:GetIndex() then
+                return true
+            end
+        end
+    end
+    
+    return false
+end
+
+-- Modified SetHugeRenderBounds function
 local function SetHugeRenderBounds(ent)
     if not IsValid(ent) then return end
     if not ent.SetRenderBounds then return end
@@ -24,20 +83,23 @@ local function SetHugeRenderBounds(ent)
     local model = ent:GetModel()
     if not model or model == "" then return end
     
-    -- Distance check (only process entities within 20000 units of any player)
-    local should_process = false
-    local ent_pos = ent:GetPos()
-    
-    for _, ply in ipairs(player.GetAll()) do
-        if ply:GetPos():DistToSqr(ent_pos) <= 20000 * 20000 then
-            should_process = true
-            break
-        end
+    -- Update visibility data if needed
+    local curTime = CurTime()
+    if curTime > lastPVSUpdate + cv_update_rate:GetFloat() then
+        UpdateVisibilityData()
+        lastPVSUpdate = curTime
     end
     
-    if not should_process then return end
-    
-    ent:SetRenderBounds(cached_mins, cached_maxs)
+    -- Set huge bounds if entity should be rendered
+    if ShouldRenderEntity(ent) then
+        local bounds_size = cv_bounds_size:GetFloat()
+        local mins = Vector(-bounds_size, -bounds_size, -bounds_size)
+        local maxs = Vector(bounds_size, bounds_size, bounds_size)
+        ent:SetRenderBounds(mins, maxs)
+    else
+        -- Set minimal bounds if entity shouldn't be rendered
+        ent:SetRenderBounds(Vector(-1, -1, -1), Vector(1, 1, 1))
+    end
 end
 
 -- Batch processing function
