@@ -1,6 +1,8 @@
 -- Optimize the view frustrum to work better with RTX Remix. This code is pretty heavy but it's the current solution we have until we get proper engine patches.
 -- MAJOR THANK YOU to the creator of NikNaks, a lot of this would not be possible without it.
 
+if not CLIENT then return end
+
 -- ConVars
 local cv_disable_culling = CreateClientConVar("disable_frustum_culling", "1", true, false, "Disable frustum culling")
 local cv_bounds_size = CreateClientConVar("frustum_bounds_size", "10000", true, false, "Size of render bounds when culling is disabled (default: 1000)")
@@ -16,6 +18,23 @@ local cv_view_distance = CreateClientConVar("pvs_view_distance", "2048", true, f
 local cv_static_prop_enabled = CreateClientConVar("disable_frustum_culling_static_props", "1", true, false, "Include static props in frustum culling disable")
 local cv_static_prop_distance = CreateClientConVar("frustum_static_prop_distance", "8000", true, false, "Maximum distance to process static props")
 local cv_static_prop_batch = CreateClientConVar("frustum_static_prop_batch", "100", true, false, "How many static props to process per frame")
+
+-- Function to check if the game is ready
+local function IsGameReady()
+    if not LocalPlayer then return false end
+    local ply = LocalPlayer()
+    return IsValid(ply) and ply:IsPlayer()
+end
+
+local function IsInRange(pos, range)
+    if not LocalPlayer then return false end
+    if not IsGameReady() then return false end
+    local ply = LocalPlayer()
+    if not IsValid(ply) then return false end
+    local playerPos = ply:GetPos()
+    if not playerPos then return false end
+    return pos:DistToSqr(playerPos) <= (range * range)
+end
 
 -- Cache variables
 local lastPVSUpdate = 0
@@ -40,11 +59,6 @@ local static_prop_queue = {}
 local is_processing_props = false
 local last_distance_check = 0
 local DISTANCE_CHECK_INTERVAL = 1 -- Check distances every second
-
-local function IsInRange(pos, range)
-    local playerPos = LocalPlayer():GetPos()
-    return pos:DistToSqr(playerPos) <= (range * range)
-end
 
 local function DrawDebugRadius()
     if not cv_enable_pvs:GetBool() then return end
@@ -156,29 +170,47 @@ local function UpdateVisibilityData()
     if not IsValid(ply) then return end
     
     local pos = ply:GetPos()
-    currentLeaf = bsp:PointInLeaf(0, pos)
+    if not pos then return end
+
+    -- Get current leaf with safety check
+    local leaf = bsp:PointInLeaf(0, pos)
+    if not leaf then return end
+    currentLeaf = leaf
     
     if cv_enable_pvs:GetBool() then
-        -- Get both PVS and PAS data
-        cachedPVS = bsp:PVSForOrigin(pos)
+        -- Get PVS data with safety check
+        local pvs = bsp:PVSForOrigin(pos)
+        if not pvs then return end
+        cachedPVS = pvs
+
+        -- Get PAS data with safety check
         local pas = bsp:PASForOrigin(pos)
-        
-        -- Merge PVS and PAS data
-        for k, v in pairs(pas) do
-            if type(k) == "number" then
-                cachedPVS[k] = true
+        if pas then -- Only merge if PAS exists
+            -- Merge PVS and PAS data
+            for k, v in pairs(pas) do
+                if type(k) == "number" then
+                    cachedPVS[k] = true
+                end
             end
         end
         
-        -- Get nearby leafs with smart radius
+        -- Get nearby leafs with smart radius and safety check
         local radius = GetSmartRadius()
-        cachedNearbyLeafs = bsp:SphereInLeafs(0, pos, radius)
+        local nearbyLeafs = bsp:SphereInLeafs(0, pos, radius)
+        if not nearbyLeafs then return end
+        cachedNearbyLeafs = nearbyLeafs
         
-        -- Add leafs in view direction
+        -- Add leafs in view direction with safety check
         local viewDir = ply:GetAimVector()
-        local viewLeafs = bsp:LineInLeafs(0, pos, pos + viewDir * cv_view_distance:GetFloat())
-        for _, leaf in ipairs(viewLeafs) do
-            table.insert(cachedNearbyLeafs, leaf)
+        if viewDir then
+            local viewLeafs = bsp:LineInLeafs(0, pos, pos + viewDir * cv_view_distance:GetFloat())
+            if viewLeafs then
+                for _, leaf in ipairs(viewLeafs) do
+                    if leaf then
+                        table.insert(cachedNearbyLeafs, leaf)
+                    end
+                end
+            end
         end
     else
         cachedPVS = nil
@@ -197,9 +229,12 @@ local function ShouldRenderEntity(ent)
     -- Always render if culling is disabled
     if not cv_disable_culling:GetBool() then return true end
     
-    -- Get entity's leaf
+    -- Get entity's leaf with safety check
     local entPos = ent:GetPos()
+    if not entPos then return true end
+    
     local entLeaf = bsp:PointInLeaf(0, entPos)
+    if not entLeaf or not entLeaf.cluster then return true end
     
     -- Always render entities in PVS
     if cachedPVS[entLeaf.cluster] then return true end
@@ -207,16 +242,23 @@ local function ShouldRenderEntity(ent)
     -- Check if in nearby leafs
     if cachedNearbyLeafs then
         for _, leaf in ipairs(cachedNearbyLeafs) do
-            if leaf:GetIndex() == entLeaf:GetIndex() then
+            if leaf and entLeaf and leaf:GetIndex() == entLeaf:GetIndex() then
                 -- If in open area, check if entity is behind player
                 if isOpenArea then
                     local ply = LocalPlayer()
-                    local toEnt = (entPos - ply:GetPos()):GetNormalized()
+                    if not IsValid(ply) then return true end
+                    
+                    local plyPos = ply:GetPos()
+                    if not plyPos then return true end
+                    
+                    local toEnt = (entPos - plyPos):GetNormalized()
                     local viewDir = ply:GetAimVector()
+                    if not viewDir then return true end
+                    
                     local dotProduct = viewDir:Dot(toEnt)
                     
                     -- Render if entity is in front of player or close enough
-                    return dotProduct > -0.5 or ply:GetPos():DistToSqr(entPos) < (cv_min_radius:GetFloat() ^ 2)
+                    return dotProduct > -0.5 or plyPos:DistToSqr(entPos) < (cv_min_radius:GetFloat() ^ 2)
                 end
                 return true
             end
@@ -326,7 +368,22 @@ end
 
 -- Function to initialize static props
 local function InitializeStaticProps()
-    if not NikNaks or not NikNaks.CurrentMap then return end
+    -- Check if LocalPlayer function exists
+    if not LocalPlayer then
+        timer.Create("RetryInitializeStaticProps", 1, 1, InitializeStaticProps)
+        return
+    end
+
+    -- Check if game is ready
+    if not IsGameReady() then
+        timer.Create("RetryInitializeStaticProps", 1, 1, InitializeStaticProps)
+        return
+    end
+
+    if not NikNaks or not NikNaks.CurrentMap then 
+        timer.Create("RetryInitializeStaticProps", 1, 1, InitializeStaticProps)
+        return 
+    end
     
     -- Clear existing props
     for _, ent in pairs(cached_static_props) do
@@ -441,6 +498,8 @@ end)
 -- Optimized think hook with timer-based updates
 local next_update = 0
 hook.Add("Think", "UpdateRenderBounds", function()
+    if not LocalPlayer then return end
+    if not IsGameReady() then return end
     if not cv_disable_culling:GetBool() then return end
     
     local curTime = CurTime()
@@ -473,7 +532,11 @@ hook.Add("Think", "UpdateRenderBounds", function()
 end)
 
 hook.Add("InitPostEntity", "InitializeStaticProps", function()
-    InitializeStaticProps()
+    -- Delay the initialization to ensure everything is loaded
+    timer.Create("InitializeStaticPropsDelay", 2, 1, function()
+        if not LocalPlayer then return end
+        InitializeStaticProps()
+    end)
     
     -- Setup original render bounds override
     local meta = FindMetaTable("Entity")
@@ -487,6 +550,21 @@ hook.Add("InitPostEntity", "InitializeStaticProps", function()
             end
             return originalSetupBones(self)
         end
+    end
+end)
+
+-- Add a hook to reinitialize when the player spawns
+hook.Add("PlayerSpawn", "ReinitializeStaticProps", function(ply)
+    if not LocalPlayer then return end
+    if ply == LocalPlayer() then
+        timer.Create("ReinitializeStaticPropsDelay", 1, 1, InitializeStaticProps)
+    end
+end)
+
+-- Add safety check for map changes
+hook.Add("OnReloaded", "RefreshStaticProps", function()
+    if IsGameReady() then
+        InitializeStaticProps()
     end
 end)
 
