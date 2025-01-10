@@ -2,14 +2,14 @@
 if not CLIENT then return end
 
 -- ConVars
-local cv_disable_culling = CreateClientConVar("disable_frustum_culling", "1", true, false, "Disable frustum culling")
-local cv_bounds_size = CreateClientConVar("frustum_bounds_size", "1024", true, false, "Size of render bounds when culling is disabled")
-local cv_update_frequency = CreateClientConVar("update_frequency", "2", true, false, "How often to update entities")
-local cv_rtx_updater_distance = CreateClientConVar("rtx_updater_distance", "2048", true, false, "Maximum render distance for RTX light updaters")
-local cv_batch_size = CreateClientConVar("batch_size", "50", true, false, "How many entities to process per frame")
-local cv_static_prop_cell_size = CreateClientConVar("static_prop_cell_size", "1024", true, false, "Size of spatial partitioning cells")
-local cv_rtx_update_frequency = CreateClientConVar("rtx_update_frequency", "1", true, false, "How often to update RTX light updaters (in seconds)")
-local cv_rtx_batch_enabled = CreateClientConVar("rtx_batch_enabled", "1", true, false, "Enable batched updates for RTX light updaters")
+local cv_disable_culling = CreateClientConVar("fr_disable", "1", true, false, "Disable frustum culling")
+local cv_bounds_size = CreateClientConVar("fr_bounds_size", "10000", true, false, "Size of render bounds when culling is disabled")
+local cv_update_frequency = CreateClientConVar("fr_update_frequency", "0.5", true, false, "How often to update entities")
+local cv_rtx_updater_distance = CreateClientConVar("fr_updater_distance", "16384", true, false, "Maximum render distance for RTX light updaters")
+local cv_batch_size = CreateClientConVar("fr_batch_size", "50", true, false, "How many entities to process per frame")
+local cv_static_prop_cell_size = CreateClientConVar("fr_static_prop_cell_size", "1024", true, false, "Size of spatial partitioning cells")
+local cv_rtx_update_frequency = CreateClientConVar("fr_update_frequency", "1", true, false, "How often to update RTX light updaters (in seconds)")
+local cv_rtx_batch_enabled = CreateClientConVar("fr_batch_enabled", "1", true, false, "Enable batched updates for RTX light updaters")
 
 -- RTX Light Updater model list
 local RTX_UPDATER_MODELS = {
@@ -345,7 +345,7 @@ hook.Add("OnReloaded", "RefreshRTXOptimization", function()
 end)
 
 -- Debug command
-concommand.Add("debug_rtx_frustum", function()
+concommand.Add("fr_debug", function()
     print("\nRTX Frustum Optimization Debug:")
     print("Culling Disabled:", cv_disable_culling:GetBool())
     print("Bounds Size:", cv_bounds_size:GetFloat())
