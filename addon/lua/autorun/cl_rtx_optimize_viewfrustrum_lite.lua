@@ -3,11 +3,13 @@ if not CLIENT then return end
 
 -- ConVars
 local cv_disable_culling = CreateClientConVar("disable_frustum_culling", "1", true, false, "Disable frustum culling")
-local cv_bounds_size = CreateClientConVar("frustum_bounds_size", "10000", true, false, "Size of render bounds when culling is disabled")
-local cv_update_frequency = CreateClientConVar("update_frequency", "0.5", true, false, "How often to update entities")
-local cv_rtx_updater_distance = CreateClientConVar("rtx_updater_distance", "16384", true, false, "Maximum render distance for RTX light updaters")
+local cv_bounds_size = CreateClientConVar("frustum_bounds_size", "1024", true, false, "Size of render bounds when culling is disabled")
+local cv_update_frequency = CreateClientConVar("update_frequency", "2", true, false, "How often to update entities")
+local cv_rtx_updater_distance = CreateClientConVar("rtx_updater_distance", "2048", true, false, "Maximum render distance for RTX light updaters")
 local cv_batch_size = CreateClientConVar("batch_size", "50", true, false, "How many entities to process per frame")
 local cv_static_prop_cell_size = CreateClientConVar("static_prop_cell_size", "1024", true, false, "Size of spatial partitioning cells")
+local cv_rtx_update_frequency = CreateClientConVar("rtx_update_frequency", "1", true, false, "How often to update RTX light updaters (in seconds)")
+local cv_rtx_batch_enabled = CreateClientConVar("rtx_batch_enabled", "1", true, false, "Enable batched updates for RTX light updaters")
 
 -- RTX Light Updater model list
 local RTX_UPDATER_MODELS = {
@@ -28,7 +30,9 @@ local Cache = {
     gridSize = cv_static_prop_cell_size:GetFloat(),
     mapBounds = { mins = Vector(0,0,0), maxs = Vector(0,0,0) },
     activeProps = {},
-    precomputedData = {}
+    precomputedData = {},
+    rtxQueue = {},
+    lastRTXUpdate = 0,
 }
 
 -- Helper functions
@@ -38,10 +42,73 @@ end
 
 local function IsRTXUpdater(ent)
     if not IsValid(ent) then return false end
+    -- Cache the result on the entity to avoid repeated checks
+    if ent.isRTXUpdaterCached ~= nil then
+        return ent.isRTXUpdaterCached
+    end
+    
     local class = ent:GetClass()
-    if class == "rtx_lightupdater" or class == "rtx_lightupdatermanager" then return true end
-    local model = ent:GetModel()
-    return model and RTX_UPDATER_MODELS[model]
+    local isUpdater = (class == "rtx_lightupdater" or class == "rtx_lightupdatermanager" or
+                      (ent:GetModel() and RTX_UPDATER_MODELS[ent:GetModel()]))
+    
+    ent.isRTXUpdaterCached = isUpdater
+    return isUpdater
+end
+
+
+local function UpdateRTXEntity(ent)
+    if not IsValid(ent) then return end
+    
+    local playerPos = LocalPlayer():GetPos()
+    local distance = playerPos:Distance(ent:GetPos())
+    local maxDistance = cv_rtx_updater_distance:GetFloat()
+    
+    -- Dynamically adjust render bounds based on distance
+    local boundsSize = math.min(distance + 1000, maxDistance)
+    local bounds = Vector(boundsSize, boundsSize, boundsSize)
+    ent:SetRenderBounds(-bounds, bounds)
+    
+    -- Only enable rendering if within maximum distance
+    ent:SetNoDraw(distance > maxDistance)
+end
+
+local function ProcessRTXUpdaters()
+    if not IsGameReady() then return end
+    
+    local curTime = CurTime()
+    if curTime < Cache.lastRTXUpdate + cv_rtx_update_frequency:GetFloat() then return end
+    Cache.lastRTXUpdate = curTime
+    
+    -- Collect all RTX updaters if queue is empty
+    if #Cache.rtxQueue == 0 then
+        for _, ent in ipairs(ents.GetAll()) do
+            if IsValid(ent) and IsRTXUpdater(ent) then
+                table.insert(Cache.rtxQueue, ent)
+            end
+        end
+    end
+    
+    if #Cache.rtxQueue == 0 then return end
+    
+    if cv_rtx_batch_enabled:GetBool() then
+        -- Process in batches
+        local batchSize = math.min(cv_batch_size:GetInt(), #Cache.rtxQueue)
+        for i = 1, batchSize do
+            local ent = table.remove(Cache.rtxQueue, 1)
+            if IsValid(ent) then
+                UpdateRTXEntity(ent)
+            end
+            if #Cache.rtxQueue == 0 then break end
+        end
+    else
+        -- Process all at once
+        for _, ent in ipairs(Cache.rtxQueue) do
+            if IsValid(ent) then
+                UpdateRTXEntity(ent)
+            end
+        end
+        Cache.rtxQueue = {}
+    end
 end
 
 -- Spatial partitioning helpers
@@ -222,10 +289,9 @@ local function QueueEntities()
     
     table.Empty(Cache.processQueue)
     
+    -- Only queue non-RTX entities here
     for _, ent in ipairs(ents.GetAll()) do
-        if IsValid(ent) and IsRTXUpdater(ent) then
-            table.insert(Cache.processQueue, 1, ent)
-        elseif IsValid(ent) and not ent.IsStaticProp then
+        if IsValid(ent) and not IsRTXUpdater(ent) and not ent.IsStaticProp then
             table.insert(Cache.processQueue, ent)
         end
     end
@@ -247,6 +313,7 @@ hook.Add("Think", "UpdateRenderBounds", function()
     Cache.lastUpdate = curTime
     QueueEntities()
     UpdateVisibleProps()
+    ProcessRTXUpdaters() -- Add RTX processing
 end)
 
 hook.Add("InitPostEntity", "InitializeRTXOptimization", function()
