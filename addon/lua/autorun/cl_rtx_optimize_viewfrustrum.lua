@@ -34,11 +34,50 @@ local Cache = {
     precomputedData = {},
     rtxQueue = {},
     lastRTXUpdate = 0,
+    boundUpdateTimes = {},
+    boundUpdateStates = {},
+    nextBoundUpdate = 0,
+    updateInterval = 0.1,
+    distanceThresholds = {
+        {dist = 1000, interval = 0.1},
+        {dist = 2000, interval = 0.25},
+        {dist = 4000, interval = 0.5},
+        {dist = 8000, interval = 1.0},
+        {dist = 16000, interval = 2.0}
+    }
 }
 
 -- Helper functions
 local function IsGameReady()
     return LocalPlayer() and IsValid(LocalPlayer())
+end
+
+local function ShouldUpdateBounds(ent)
+    if not IsValid(ent) then return false end
+    
+    local curTime = CurTime()
+    
+    -- Global throttle check
+    if curTime < Cache.nextBoundUpdate then return false end
+    
+    -- Check entity's last update time
+    local lastUpdate = Cache.boundUpdateTimes[ent] or 0
+    local playerPos = LocalPlayer():GetPos()
+    local entPos = ent:GetPos()
+    local distance = playerPos:Distance(entPos)
+    
+    -- Determine update interval based on distance
+    local updateInterval = Cache.updateInterval
+    for _, threshold in ipairs(Cache.distanceThresholds) do
+        if distance > threshold.dist then
+            updateInterval = threshold.interval
+        else
+            break
+        end
+    end
+    
+    -- Check if enough time has passed for this entity
+    return curTime - lastUpdate >= updateInterval
 end
 
 local function IsRTXUpdater(ent)
@@ -244,19 +283,39 @@ end
 
 -- Entity Bounds Management
 local function SetEntityBounds(ent)
-    if not IsValid(ent) then return end
+    if not IsValid(ent) or not cv_disable_culling:GetBool() then return end
     
+    -- Only update if necessary
+    if not ShouldUpdateBounds(ent) then return end
+    
+    -- Special handling for RTX updaters
     if IsRTXUpdater(ent) then
         local huge_bounds = Vector(cv_rtx_updater_distance:GetFloat(), cv_rtx_updater_distance:GetFloat(), cv_rtx_updater_distance:GetFloat())
-        ent:SetRenderBounds(-huge_bounds, huge_bounds)
-        ent:DisableMatrix("RenderMultiply")
-        ent:SetNoDraw(false)
-        return
+        
+        -- Check if bounds have changed
+        local currentState = Cache.boundUpdateStates[ent]
+        local newState = tostring(huge_bounds)
+        
+        if currentState ~= newState then
+            ent:SetRenderBounds(-huge_bounds, huge_bounds)
+            ent:DisableMatrix("RenderMultiply")
+            ent:SetNoDraw(false)
+            Cache.boundUpdateStates[ent] = newState
+        end
+    else
+        -- Regular entities
+        local currentState = Cache.boundUpdateStates[ent]
+        local newState = tostring(Cache.mins) .. tostring(Cache.maxs)
+        
+        if currentState ~= newState then
+            ent:SetRenderBounds(Cache.mins, Cache.maxs)
+            Cache.boundUpdateStates[ent] = newState
+        end
     end
     
-    if cv_disable_culling:GetBool() then
-        ent:SetRenderBounds(Cache.mins, Cache.maxs)
-    end
+    -- Update the last update time
+    Cache.boundUpdateTimes[ent] = CurTime()
+    Cache.nextBoundUpdate = CurTime() + 0.016 -- Limit to roughly once per frame maximum
 end
 
 -- Batch processing
@@ -342,7 +401,15 @@ hook.Add("OnReloaded", "RefreshRTXOptimization", function()
     Cache.activeProps = {}
     Cache.grid = {}
     Cache.precomputedData = {}
+    Cache.boundUpdateTimes = {}
+    Cache.boundUpdateStates = {}
+    Cache.nextBoundUpdate = 0
     PrecomputePropData()
+end)
+
+hook.Add("EntityRemoved", "CleanupBoundsCache", function(ent)
+    Cache.boundUpdateTimes[ent] = nil
+    Cache.boundUpdateStates[ent] = nil
 end)
 
 -- Debug command
