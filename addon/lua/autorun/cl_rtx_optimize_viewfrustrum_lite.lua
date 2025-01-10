@@ -1,0 +1,305 @@
+-- Optimize the view frustrum to work better with RTX Remix
+if not CLIENT then return end
+
+-- ConVars
+local cv_disable_culling = CreateClientConVar("disable_frustum_culling", "1", true, false, "Disable frustum culling")
+local cv_bounds_size = CreateClientConVar("frustum_bounds_size", "10000", true, false, "Size of render bounds when culling is disabled")
+local cv_update_frequency = CreateClientConVar("update_frequency", "0.5", true, false, "How often to update entities")
+local cv_rtx_updater_distance = CreateClientConVar("rtx_updater_distance", "16384", true, false, "Maximum render distance for RTX light updaters")
+local cv_batch_size = CreateClientConVar("batch_size", "50", true, false, "How many entities to process per frame")
+local cv_static_prop_cell_size = CreateClientConVar("static_prop_cell_size", "1024", true, false, "Size of spatial partitioning cells")
+
+-- RTX Light Updater model list
+local RTX_UPDATER_MODELS = {
+    ["models/hunter/plates/plate.mdl"] = true,
+    ["models/hunter/blocks/cube025x025x025.mdl"] = true
+}
+
+-- Cache system
+local Cache = {
+    processQueue = {},
+    isProcessing = false,
+    lastUpdate = 0,
+    boundsSize = cv_bounds_size:GetFloat(),
+    mins = Vector(-cv_bounds_size:GetFloat(), -cv_bounds_size:GetFloat(), -cv_bounds_size:GetFloat()),
+    maxs = Vector(cv_bounds_size:GetFloat(), cv_bounds_size:GetFloat(), cv_bounds_size:GetFloat()),
+    -- Spatial partitioning grid
+    grid = {},
+    gridSize = cv_static_prop_cell_size:GetFloat(),
+    mapBounds = { mins = Vector(0,0,0), maxs = Vector(0,0,0) },
+    activeProps = {},
+    precomputedData = {}
+}
+
+-- Helper functions
+local function IsGameReady()
+    return LocalPlayer() and IsValid(LocalPlayer())
+end
+
+local function IsRTXUpdater(ent)
+    if not IsValid(ent) then return false end
+    local class = ent:GetClass()
+    if class == "rtx_lightupdater" or class == "rtx_lightupdatermanager" then return true end
+    local model = ent:GetModel()
+    return model and RTX_UPDATER_MODELS[model]
+end
+
+-- Spatial partitioning helpers
+local function GetGridCell(pos)
+    local cellSize = Cache.gridSize
+    return {
+        math.floor(pos.x / cellSize),
+        math.floor(pos.y / cellSize),
+        math.floor(pos.z / cellSize)
+    }
+end
+
+local function GetGridKey(x, y, z)
+    return string.format("%d:%d:%d", x, y, z)
+end
+
+local function PrecomputePropData()
+    if not NikNaks or not NikNaks.CurrentMap then return end
+    
+    local staticProps = NikNaks.CurrentMap:GetStaticProps()
+    local mapMins, mapMaxs = Vector(math.huge, math.huge, math.huge), Vector(-math.huge, -math.huge, -math.huge)
+    
+    -- First pass: Get map bounds and precompute prop data
+    for _, prop in pairs(staticProps) do
+        local pos = prop:GetPos()
+        local model = prop:GetModel()
+        
+        -- Update map bounds
+        mapMins.x = math.min(mapMins.x, pos.x)
+        mapMins.y = math.min(mapMins.y, pos.y)
+        mapMins.z = math.min(mapMins.z, pos.z)
+        mapMaxs.x = math.max(mapMaxs.x, pos.x)
+        mapMaxs.y = math.max(mapMaxs.y, pos.y)
+        mapMaxs.z = math.max(mapMaxs.z, pos.z)
+        
+        -- Use NikNaks' model size function instead of util.GetModelBounds
+        local modelMins, modelMaxs = NikNaks.ModelSize(model)
+        Cache.precomputedData[model] = Cache.precomputedData[model] or {
+            bounds = { mins = modelMins, maxs = modelMaxs },
+            vertices = nil  -- Remove vertices as they're not needed
+        }
+    end
+    
+    Cache.mapBounds.mins = mapMins
+    Cache.mapBounds.maxs = mapMaxs
+    
+    -- Second pass: Build spatial grid
+    local cellSize = Cache.gridSize
+    for _, prop in pairs(staticProps) do
+        local pos = prop:GetPos()
+        local gridCell = GetGridCell(pos)
+        local key = GetGridKey(gridCell[1], gridCell[2], gridCell[3])
+        
+        Cache.grid[key] = Cache.grid[key] or {}
+        table.insert(Cache.grid[key], {
+            model = prop:GetModel(),
+            pos = pos,
+            ang = prop:GetAngles(),
+            color = prop:GetColor(),
+            scale = prop:GetScale(),
+            entity = nil -- Will be populated when needed
+        })
+    end
+end
+
+-- Visibility management
+local function GetVisibleCells(playerPos, radius)
+    local visibleCells = {}
+    local minCell = GetGridCell(playerPos - Vector(radius, radius, radius))
+    local maxCell = GetGridCell(playerPos + Vector(radius, radius, radius))
+    
+    for x = minCell[1], maxCell[1] do
+        for y = minCell[2], maxCell[2] do
+            for z = minCell[3], maxCell[3] do
+                local key = GetGridKey(x, y, z)
+                if Cache.grid[key] then
+                    visibleCells[key] = true
+                end
+            end
+        end
+    end
+    
+    return visibleCells
+end
+
+local function UpdateVisibleProps()
+    if not IsGameReady() then return end
+    
+    local playerPos = LocalPlayer():GetPos()
+    local visibleRange = cv_bounds_size:GetFloat()
+    local visibleCells = GetVisibleCells(playerPos, visibleRange)
+    local newActiveProps = {}
+    
+    -- Create/update props in visible cells
+    for key in pairs(visibleCells) do
+        local cell = Cache.grid[key]
+        if not cell then continue end
+        
+        for _, propData in ipairs(cell) do
+            if propData.pos:DistToSqr(playerPos) > visibleRange * visibleRange then
+                continue
+            end
+            
+            -- Create or reuse entity
+            if not IsValid(propData.entity) then
+                propData.entity = ClientsideModel(propData.model)
+                if IsValid(propData.entity) then
+                    propData.entity:SetPos(propData.pos)
+                    propData.entity:SetAngles(propData.ang)
+                    propData.entity:SetColor(propData.color)
+                    propData.entity:SetModelScale(propData.scale)
+                    propData.entity:SetRenderBounds(Cache.mins, Cache.maxs)
+                    propData.entity.IsStaticProp = true
+                end
+            end
+            
+            if IsValid(propData.entity) then
+                newActiveProps[propData.entity] = true
+            end
+        end
+    end
+    
+    -- Remove props that are no longer visible
+    for ent in pairs(Cache.activeProps) do
+        if not newActiveProps[ent] and IsValid(ent) then
+            ent:Remove()
+        end
+    end
+    
+    Cache.activeProps = newActiveProps
+end
+
+-- Entity Bounds Management
+local function SetEntityBounds(ent)
+    if not IsValid(ent) then return end
+    
+    if IsRTXUpdater(ent) then
+        local huge_bounds = Vector(cv_rtx_updater_distance:GetFloat(), cv_rtx_updater_distance:GetFloat(), cv_rtx_updater_distance:GetFloat())
+        ent:SetRenderBounds(-huge_bounds, huge_bounds)
+        ent:DisableMatrix("RenderMultiply")
+        ent:SetNoDraw(false)
+        return
+    end
+    
+    if cv_disable_culling:GetBool() then
+        ent:SetRenderBounds(Cache.mins, Cache.maxs)
+    end
+end
+
+-- Batch processing
+local function ProcessBatch()
+    if #Cache.processQueue == 0 then
+        Cache.isProcessing = false
+        return
+    end
+    
+    local batchSize = math.min(cv_batch_size:GetInt(), #Cache.processQueue)
+    local processed = 0
+    local startTime = SysTime()
+    
+    while processed < batchSize and (SysTime() - startTime) < 0.002 do
+        local ent = table.remove(Cache.processQueue, 1)
+        if IsValid(ent) then
+            SetEntityBounds(ent)
+            processed = processed + 1
+        end
+    end
+    
+    if #Cache.processQueue > 0 then
+        timer.Simple(0, ProcessBatch)
+    else
+        Cache.isProcessing = false
+    end
+end
+
+local function QueueEntities()
+    if not IsGameReady() then return end
+    
+    table.Empty(Cache.processQueue)
+    
+    for _, ent in ipairs(ents.GetAll()) do
+        if IsValid(ent) and IsRTXUpdater(ent) then
+            table.insert(Cache.processQueue, 1, ent)
+        elseif IsValid(ent) and not ent.IsStaticProp then
+            table.insert(Cache.processQueue, ent)
+        end
+    end
+    
+    if not Cache.isProcessing and #Cache.processQueue > 0 then
+        Cache.isProcessing = true
+        ProcessBatch()
+    end
+end
+
+-- Hooks
+hook.Add("Think", "UpdateRenderBounds", function()
+    if not cv_disable_culling:GetBool() then return end
+    if not IsGameReady() then return end
+    
+    local curTime = CurTime()
+    if curTime < Cache.lastUpdate + cv_update_frequency:GetFloat() then return end
+    
+    Cache.lastUpdate = curTime
+    QueueEntities()
+    UpdateVisibleProps()
+end)
+
+hook.Add("InitPostEntity", "InitializeRTXOptimization", function()
+    timer.Simple(2, function()
+        PrecomputePropData()
+        RunConsoleCommand("r_drawstaticprops", "0")
+    end)
+end)
+
+hook.Add("OnEntityCreated", "HandleNewEntity", function(ent)
+    if not IsValid(ent) then return end
+    
+    timer.Simple(0, function()
+        if IsValid(ent) then
+            SetEntityBounds(ent)
+        end
+    end)
+end)
+
+-- Map changes
+hook.Add("OnReloaded", "RefreshRTXOptimization", function()
+    for ent in pairs(Cache.activeProps) do
+        if IsValid(ent) then ent:Remove() end
+    end
+    Cache.activeProps = {}
+    Cache.grid = {}
+    Cache.precomputedData = {}
+    PrecomputePropData()
+end)
+
+-- Debug command
+concommand.Add("debug_rtx_frustum", function()
+    print("\nRTX Frustum Optimization Debug:")
+    print("Culling Disabled:", cv_disable_culling:GetBool())
+    print("Bounds Size:", cv_bounds_size:GetFloat())
+    print("Update Frequency:", cv_update_frequency:GetFloat())
+    print("RTX Updater Distance:", cv_rtx_updater_distance:GetFloat())
+    print("Grid Cell Size:", Cache.gridSize)
+    print("\nCurrent State:")
+    print("Queue Size:", #Cache.processQueue)
+    print("Is Processing:", Cache.isProcessing)
+    print("Active Props:", table.Count(Cache.activeProps))
+    print("Precomputed Models:", table.Count(Cache.precomputedData))
+    
+    local cellCount = 0
+    for _ in pairs(Cache.grid) do cellCount = cellCount + 1 end
+    print("Grid Cells:", cellCount)
+    
+    local rtxCount = 0
+    for _, ent in ipairs(ents.GetAll()) do
+        if IsValid(ent) and IsRTXUpdater(ent) then
+            rtxCount = rtxCount + 1
+        end
+    end
+    print("RTX Updaters:", rtxCount)
+end)
