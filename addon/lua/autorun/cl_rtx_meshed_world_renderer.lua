@@ -30,6 +30,25 @@ local MAX_VERTICES = 10000
 local EyePos = EyePos
 
 -- Utility Functions
+
+local function IsBrushEntity(face)
+    if not face then return false end
+    
+    -- First check if it's a brush model
+    if face.__bmodel and face.__bmodel > 0 then
+        return true -- Any non-zero bmodel index indicates it's a brush entity
+    end
+    
+    -- Secondary check for brush entities using parent entity
+    local parent = face.__parent
+    if parent and isentity(parent) and parent:GetClass() then
+        -- If the face has a valid parent entity, it's likely a brush entity
+        return true
+    end
+    
+    return false
+end
+
 local function IsSkyboxFace(face)
     if not face then return false end
     
@@ -100,9 +119,15 @@ local function BuildMapMeshes()
         
         local leafFaces = leaf:GetFaces(true)
         if not leafFaces then continue end
-
+    
         for _, face in pairs(leafFaces) do
-            if not face or not face:ShouldRender() or IsSkyboxFace(face) then continue end
+            -- Add brush entity check early in the conditions
+            if not face or 
+               IsBrushEntity(face) or -- Move this check earlier
+               not face:ShouldRender() or 
+               IsSkyboxFace(face) then 
+                continue 
+            end
             
             -- Skip processing if no vertices
             local vertices = face:GetVertexs()
