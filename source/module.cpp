@@ -185,6 +185,7 @@ GMOD_MODULE_OPEN() {
 
         // Initialize shader protection
         ShaderAPIHooks::Instance().Initialize();
+        ShaderAPIHooks::Instance().EnableCustomSkyboxRendering();
         ModelRenderHooks::Instance().Initialize();
 
         // Find Source's D3D9 device
@@ -242,6 +243,7 @@ GMOD_MODULE_CLOSE() {
         Msg("[RTX] Shutting down module...\n");
 
                 // Shutdown shader protection
+        ShaderAPIHooks::Instance().DisableCustomSkyboxRendering();
         ShaderAPIHooks::Instance().Shutdown();
         
         RTXLightManager::Instance().Shutdown();
