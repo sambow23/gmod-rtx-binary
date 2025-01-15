@@ -7,16 +7,27 @@ require("niknaks")
 local CONVARS = {
     ENABLED = CreateClientConVar("rtx_force_render", "1", true, false, "Forces custom mesh rendering of map"),
     DEBUG = CreateClientConVar("rtx_force_render_debug", "0", true, false, "Shows debug info for mesh rendering"),
-    CHUNK_SIZE = CreateClientConVar("rtx_chunk_size", "512", true, false, "Size of chunks for mesh combining")
+    CHUNK_SIZE = CreateClientConVar("rtx_chunk_size", "8196", true, false, "Size of chunks for mesh combining")
 }
 
 local MAX_MESH_VERTICES = 10000 -- Source engine mesh vertex limit
 
--- Local Variables
+-- Local Variables and Caches
 local mapMeshes = {}
 local isEnabled = false
 local renderStats = {draws = 0}
 local materialCache = {}
+local Vector = Vector
+local math_min = math.min
+local math_max = math.max
+local math_huge = math.huge
+local math_floor = math.floor
+local table_insert = table.insert
+local LocalToWorld = LocalToWorld
+local angle_zero = Angle(0,0,0)
+local vector_origin = Vector(0,0,0)
+local MAX_VERTICES = 10000
+local EyePos = EyePos
 
 -- Utility Functions
 local function IsSkyboxFace(face)
@@ -34,215 +45,30 @@ local function IsSkyboxFace(face)
 end
 
 local function GetChunkKey(x, y, z)
-    return string.format("%d,%d,%d", x, y, z)
-end
-
--- Displacement Handling Functions
-local function GetDisplacementVertexs(self, faceVertexData)
-    local dispInfo = self:GetDisplacementInfo()
-    local baseVerts = faceVertexData
-
-    -- Check for valid displacement data
-    if not baseVerts or #baseVerts ~= 4 then
-        if CONVARS.DEBUG:GetBool() then
-            print(string.format("[RTX Fixes] Invalid displacement face: Expected 4 vertices, got %d", #baseVerts or 0))
-        end
-        return nil
-    end
-
-    -- Calculate displacement grid size
-    local power = dispInfo.power
-    local gridSize = bit.lshift(1, power) + 1
-    local vertCount = gridSize * gridSize
-
-    -- Get displacement verts data
-    local dispVerts = self.__map:GetDispVerts()
-    local vertStart = dispInfo.DispVertStart
-
-    -- First, establish the correct base geometry
-    local corners = {
-        baseVerts[1].pos,
-        baseVerts[2].pos,
-        baseVerts[3].pos,
-        baseVerts[4].pos
-    }
-
-    -- Calculate UV basis vectors
-    local uAxis = (corners[2] - corners[1])
-    local vAxis = (corners[4] - corners[1])
-    uAxis:Normalize()
-    vAxis:Normalize()
-
-    -- Create vertices array
-    local vertices = {}
-    
-    -- Generate displacement grid
-    for row = 0, gridSize - 1 do
-        local v = row / (gridSize - 1)
-        for col = 0, gridSize - 1 do
-            local u = col / (gridSize - 1)
-            local vertIdx = vertStart + row * gridSize + col
-            local dispVert = dispVerts[vertIdx]
-            
-            if not dispVert then continue end
-
-            -- Calculate base position using bilinear interpolation
-            local left = corners[1] + (corners[4] - corners[1]) * v
-            local right = corners[2] + (corners[3] - corners[2]) * v
-            local basePos = left + (right - left) * u
-
-            -- Calculate UV coordinates
-            local uvLeft = Vector(baseVerts[1].u, baseVerts[1].v, 0) * (1-v) + 
-                         Vector(baseVerts[4].u, baseVerts[4].v, 0) * v
-            local uvRight = Vector(baseVerts[2].u, baseVerts[2].v, 0) * (1-v) + 
-                          Vector(baseVerts[3].u, baseVerts[3].v, 0) * v
-            local uv = uvLeft + (uvRight - uvLeft) * u
-
-            -- Apply displacement
-            local dispVector = dispVert.vec
-            local dispDistance = dispVert.dist
-            local finalPos = basePos + dispVector * dispDistance
-
-            -- Handle entity transforms if needed
-            if self.__bmodel > 0 then
-                local func_brush = self.__map:GetEntities()[self.__bmodel]
-                if func_brush and func_brush.origin then
-                    finalPos = finalPos + func_brush.origin
-                end
-            end
-
-            -- Store vertex data
-            vertices[#vertices + 1] = {
-                pos = finalPos,
-                normal = dispVector:GetNormalized(),
-                u = uv.x,
-                v = uv.y,
-                userdata = {0, 0, 0, 0}
-            }
-        end
-    end
-
-    return vertices
-end
-
-local function GridPolyChop(grid)
-    local width = math.sqrt(#grid)
-    local triangles = {}
-    
-    for row = 0, width - 2 do
-        for col = 0, width - 2 do
-            local i1 = row * width + col
-            local i2 = i1 + 1
-            local i3 = i1 + width
-            local i4 = i3 + 1
-            
-            -- First triangle
-            table.insert(triangles, grid[i1 + 1])
-            table.insert(triangles, grid[i2 + 1])
-            table.insert(triangles, grid[i3 + 1])
-            
-            -- Second triangle
-            table.insert(triangles, grid[i2 + 1])
-            table.insert(triangles, grid[i4 + 1])
-            table.insert(triangles, grid[i3 + 1])
-        end
-    end
-    
-    return triangles
-end
-
--- Mesh Creation Functions
-local function CreateChunkMeshGroup(faces, material)
-    if not faces or #faces == 0 or not material then return nil end
-
-    local MAX_VERTICES = 10000
-    local meshGroups = {}
-    
-    -- Collect vertex data
-    local allVertices = {}
-    local totalVertices = 0
-    
-    for _, face in ipairs(faces) do
-        -- Use GenerateVertexTriangleData for both regular faces and displacements
-        local verts = face:GenerateVertexTriangleData()
-        if verts then
-            for _, vert in ipairs(verts) do
-                if vert.pos and vert.normal then
-                    -- Apply brush entity transforms if needed
-                    if face.__bmodel > 0 then
-                        local func_brush = face.__map:GetEntities()[face.__bmodel]
-                        if func_brush and func_brush.origin then
-                            vert.pos = vert.pos + func_brush.origin
-                            if func_brush.angles then
-                                local ang = func_brush.angles
-                                vert.pos = LocalToWorld(vert.pos, Angle(0,0,0), Vector(0,0,0), ang)
-                                vert.normal = ang:Forward() * vert.normal.x + 
-                                            ang:Right() * vert.normal.y + 
-                                            ang:Up() * vert.normal.z
-                            end
-                        end
-                    end
-                    
-                    totalVertices = totalVertices + 1
-                    table.insert(allVertices, vert)
-                end
-            end
-        end
-    end
-    
-    if CONVARS.DEBUG:GetBool() then
-        print(string.format("[RTX Fixes] Processing chunk with %d total vertices", totalVertices))
-    end
-    
-    -- Calculate mesh distribution
-    local meshCount = math.ceil(totalVertices / MAX_VERTICES)
-    local vertsPerMesh = math.floor(totalVertices / meshCount)
-    
-    -- Create mesh batches
-    local vertexIndex = 1
-    while vertexIndex <= #allVertices do
-        local remainingVerts = #allVertices - vertexIndex + 1
-        local vertsThisMesh = math.min(MAX_VERTICES, remainingVerts)
-        
-        if vertsThisMesh > 0 then
-            local newMesh = Mesh(material)
-            mesh.Begin(newMesh, MATERIAL_TRIANGLES, vertsThisMesh)
-            
-            for i = 0, vertsThisMesh - 1 do
-                local vert = allVertices[vertexIndex + i]
-                mesh.Position(vert.pos)
-                mesh.Normal(vert.normal)
-                mesh.TexCoord(0, vert.u or 0, vert.v or 0)
-                mesh.AdvanceVertex()
-            end
-            
-            mesh.End()
-            table.insert(meshGroups, newMesh)
-        end
-        
-        vertexIndex = vertexIndex + vertsThisMesh
-    end
-    
-    return meshGroups
+    return x .. "," .. y .. "," .. z
 end
 
 local function GetDisplacementBounds(face)
-    local dispInfo = face:GetDisplacementInfo()
-    local verts = face:GenerateVertexTriangleData()
-    if not verts or #verts == 0 then return Vector(), Vector() end
+    if face._bounds then return face._bounds.mins, face._bounds.maxs end
     
-    local mins = Vector(math.huge, math.huge, math.huge)
-    local maxs = Vector(-math.huge, -math.huge, -math.huge)
+    local verts = face:GenerateVertexTriangleData()
+    if not verts or #verts == 0 then return vector_origin, vector_origin end
+    
+    local mins = Vector(math_huge, math_huge, math_huge)
+    local maxs = Vector(-math_huge, -math_huge, -math_huge)
     
     for _, vert in ipairs(verts) do
-        mins.x = math.min(mins.x, vert.pos.x)
-        mins.y = math.min(mins.y, vert.pos.y)
-        mins.z = math.min(mins.z, vert.pos.z)
-        maxs.x = math.max(maxs.x, vert.pos.x)
-        maxs.y = math.max(maxs.y, vert.pos.y)
-        maxs.z = math.max(maxs.z, vert.pos.z)
+        local pos = vert.pos
+        mins.x = math_min(mins.x, pos.x)
+        mins.y = math_min(mins.y, pos.y)
+        mins.z = math_min(mins.z, pos.z)
+        maxs.x = math_max(maxs.x, pos.x)
+        maxs.y = math_max(maxs.y, pos.y)
+        maxs.z = math_max(maxs.z, pos.z)
     end
     
+    -- Cache the bounds
+    face._bounds = {mins = mins, maxs = maxs}
     return mins, maxs
 end
 
@@ -386,99 +212,100 @@ local function BuildMapMeshes()
     local function CreateDisplacementMeshGroup(faces, material)
         if not faces or #faces == 0 or not material then return nil end
         
-        -- Sort faces by distance from camera (back to front)
-        local sortedFaces = table.Copy(faces)
-        table.sort(sortedFaces, function(a, b)
-            local aMin, aMax = GetDisplacementBounds(a)
-            local bMin, bMax = GetDisplacementBounds(b)
-            local aCenter = (aMin + aMax) * 0.5
-            local bCenter = (bMin + bMax) * 0.5
-            local camPos = EyePos()
-            return aCenter:DistToSqr(camPos) > bCenter:DistToSqr(camPos)
-        end)
-        
+        -- Preallocate tables
         local meshGroups = {}
-        local currentVertices = {}
-        local vertexCount = 0
+        local currentVertices = {} -- Changed from table.Create()
+        local currentSize = 0      -- Track size manually
         
-        -- Process faces maintaining back-to-front order
+        -- Sort faces by distance (only when needed)
+        local camPos = EyePos()
+        local sortedFaces = faces
+        if #faces > 1 then
+            sortedFaces = table.Copy(faces)
+            table.sort(sortedFaces, function(a, b)
+                local aMin, aMax = GetDisplacementBounds(a)
+                local bMin, bMax = GetDisplacementBounds(b)
+                local aDist = ((aMin + aMax) * 0.5):DistToSqr(camPos)
+                local bDist = ((bMin + bMax) * 0.5):DistToSqr(camPos)
+                return aDist > bDist
+            end)
+        end
+        
+        -- Process faces with optimized batching
+        local function FlushCurrentBatch()
+            if currentSize > 0 then
+                local newMesh = Mesh(material)
+                mesh.Begin(newMesh, MATERIAL_TRIANGLES, currentSize)
+                
+                for i = 1, currentSize do
+                    local vert = currentVertices[i]
+                    mesh.Position(vert.pos)
+                    mesh.Normal(vert.normal)
+                    mesh.TexCoord(0, vert.u, vert.v)
+                    mesh.AdvanceVertex()
+                end
+                
+                mesh.End()
+                table_insert(meshGroups, newMesh)
+                
+                -- Clear batch
+                currentVertices = {}
+                currentSize = 0
+            end
+        end
+        
+        -- Process vertices with minimal table operations
         for _, face in ipairs(sortedFaces) do
             local verts = face:GenerateVertexTriangleData()
             if not verts then continue end
             
-            -- Check if adding these vertices would exceed the limit
-            if vertexCount + #verts > 10000 then
-                -- Create mesh from current vertices
-                if #currentVertices > 0 then
-                    local newMesh = Mesh(material)
-                    mesh.Begin(newMesh, MATERIAL_TRIANGLES, #currentVertices)
-                    
-                    for _, vert in ipairs(currentVertices) do
-                        mesh.Position(vert.pos)
-                        mesh.Normal(vert.normal)
-                        mesh.TexCoord(0, vert.u or 0, vert.v or 0)
-                        mesh.AdvanceVertex()
-                    end
-                    
-                    mesh.End()
-                    table.insert(meshGroups, newMesh)
-                end
-                
-                -- Reset for next batch
-                currentVertices = {}
-                vertexCount = 0
+            if currentSize + #verts > MAX_VERTICES then
+                FlushCurrentBatch()
             end
             
-            -- Process vertices for this face
-            for _, vert in ipairs(verts) do
-                if vert.pos and vert.normal then
-                    -- Apply any necessary transforms
-                    local finalPos = Vector(vert.pos)
-                    local finalNormal = Vector(vert.normal)
+            local bmodel = face.__bmodel
+            if bmodel > 0 then
+                local func_brush = face.__map:GetEntities()[bmodel]
+                if func_brush then
+                    local origin = func_brush.origin
+                    local angles = func_brush.angles
                     
-                    if face.__bmodel > 0 then
-                        local func_brush = face.__map:GetEntities()[face.__bmodel]
-                        if func_brush then
-                            if func_brush.origin then
-                                finalPos = finalPos + func_brush.origin
+                    for _, vert in ipairs(verts) do
+                        if vert.pos and vert.normal then
+                            currentSize = currentSize + 1
+                            local finalPos = Vector(vert.pos)
+                            local finalNormal = Vector(vert.normal)
+                            
+                            if origin then
+                                finalPos:Add(origin)
                             end
-                            if func_brush.angles then
-                                local ang = func_brush.angles
-                                finalPos = LocalToWorld(finalPos, angle_zero, Vector(0,0,0), ang)
-                                finalNormal = ang:Forward() * finalNormal.x + 
-                                            ang:Right() * finalNormal.y + 
-                                            ang:Up() * finalNormal.z
+                            if angles then
+                                finalPos = LocalToWorld(finalPos, angle_zero, vector_origin, angles)
+                                finalNormal = angles:Forward() * finalNormal.x + 
+                                            angles:Right() * finalNormal.y + 
+                                            angles:Up() * finalNormal.z
                             end
+                            
+                            currentVertices[currentSize] = {
+                                pos = finalPos,
+                                normal = finalNormal,
+                                u = vert.u,
+                                v = vert.v
+                            }
                         end
                     end
-                    
-                    table.insert(currentVertices, {
-                        pos = finalPos,
-                        normal = finalNormal,
-                        u = vert.u,
-                        v = vert.v
-                    })
-                    vertexCount = vertexCount + 1
+                end
+            else
+                for _, vert in ipairs(verts) do
+                    if vert.pos and vert.normal then
+                        currentSize = currentSize + 1
+                        currentVertices[currentSize] = vert
+                    end
                 end
             end
         end
         
-        -- Create final mesh from remaining vertices
-        if #currentVertices > 0 then
-            local newMesh = Mesh(material)
-            mesh.Begin(newMesh, MATERIAL_TRIANGLES, #currentVertices)
-            
-            for _, vert in ipairs(currentVertices) do
-                mesh.Position(vert.pos)
-                mesh.Normal(vert.normal)
-                mesh.TexCoord(0, vert.u or 0, vert.v or 0)
-                mesh.AdvanceVertex()
-            end
-            
-            mesh.End()
-            table.insert(meshGroups, newMesh)
-        end
-        
+        FlushCurrentBatch()
         return meshGroups
     end
     
@@ -513,33 +340,33 @@ end
 local function RenderCustomWorld(translucent)
     if not isEnabled then return end
 
-    renderStats.draws = 0
-
+    local draws = 0
+    local currentMaterial = nil
+    
+    -- Inline render state changes for speed
     if translucent then
         render.SetBlend(1)
         render.OverrideDepthEnable(true, true)
     end
-
-    -- First render regular faces
-    local groups = translucent and mapMeshes.translucent or mapMeshes.opaque
-    local currentMaterial = nil
     
+    -- Regular faces
+    local groups = translucent and mapMeshes.translucent or mapMeshes.opaque
     for _, chunkMaterials in pairs(groups) do
         for _, group in pairs(chunkMaterials) do
             if currentMaterial ~= group.material then
                 render.SetMaterial(group.material)
                 currentMaterial = group.material
             end
-            for _, mesh in ipairs(group.meshes) do
-                mesh:Draw()
-                renderStats.draws = renderStats.draws + 1
+            local meshes = group.meshes
+            for i = 1, #meshes do
+                meshes[i]:Draw()
+                draws = draws + 1
             end
         end
     end
-
-    -- Then render displacements with proper depth testing
+    
+    -- Displacements
     if not translucent then
-        render.SetColorMaterial() -- Reset material state
         render.OverrideDepthEnable(true, true)
         
         for _, chunkMaterials in pairs(mapMeshes.displacements) do
@@ -548,19 +375,20 @@ local function RenderCustomWorld(translucent)
                     render.SetMaterial(group.material)
                     currentMaterial = group.material
                 end
-                for _, mesh in ipairs(group.meshes) do
-                    mesh:Draw()
-                    renderStats.draws = renderStats.draws + 1
+                local meshes = group.meshes
+                for i = 1, #meshes do
+                    meshes[i]:Draw()
+                    draws = draws + 1
                 end
             end
         end
         
         render.OverrideDepthEnable(false)
-    end
-
-    if translucent then
+    elseif translucent then
         render.OverrideDepthEnable(false)
     end
+    
+    renderStats.draws = draws
 end
 
 -- Enable/Disable Functions
