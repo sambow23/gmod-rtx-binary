@@ -84,17 +84,23 @@ function ENT:Think()
             local b = self:GetLightB()
 
             -- Queue update in RTX manager
-            if UpdateRTXLight(
+            local success, newHandle = UpdateRTXLight(
                 self.rtxLightHandle,
                 pos.x, pos.y, pos.z,
                 size,
                 brightness,
                 r, g, b
-            ) then
+            )
+
+            if success then
+                -- Update handle if it changed after recreation
+                if newHandle and newHandle ~= self.rtxLightHandle then
+                    self.rtxLightHandle = newHandle
+                end
                 self.lastUpdatePos = pos
                 self.lastUpdateTime = CurTime()
             else
-                -- If update failed, recreate light
+                -- If update failed, try to recreate light
                 self:CreateRTXLight()
             end
         end

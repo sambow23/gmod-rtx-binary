@@ -85,15 +85,15 @@ LUA_FUNCTION(UpdateRTXLight) {
     try {
         if (!g_remix) {
             Msg("[RTX Remix Fixes] Remix interface is null\n");
-            LUA->ThrowError("[RTX Remix Fixes] - Remix interface is null");
-            return 0;
+            LUA->PushBool(false);
+            return 1;
         }
 
         auto handle = static_cast<remixapi_LightHandle>(LUA->GetUserdata(1));
         if (!handle) {
             Msg("[RTX Remix Fixes] Invalid light handle\n");
-            LUA->ThrowError("[RTX Remix Fixes] - Invalid light handle");
-            return 0;
+            LUA->PushBool(false);
+            return 1;
         }
 
         float x = LUA->CheckNumber(2);
@@ -119,19 +119,24 @@ LUA_FUNCTION(UpdateRTXLight) {
         props.b = (b / 255.0f) > 1.0f ? 1.0f : (b / 255.0f < 0.0f ? 0.0f : b / 255.0f);
 
         auto& manager = RTXLightManager::Instance();
-        if (!manager.UpdateLight(handle, props)) {
+        remixapi_LightHandle newHandle;
+        if (!manager.UpdateLight(handle, props, &newHandle)) {
             Msg("[RTX Remix Fixes] Failed to update light\n");
-            LUA->ThrowError("[RTX Remix Fixes] - Failed to update light");
-            return 0;
+            LUA->PushBool(false);
+            return 1;
         }
 
-        LUA->PushUserdata(handle);
+        LUA->PushBool(true);
+        if (newHandle != handle) {
+            LUA->PushUserdata(newHandle);
+            return 2;
+        }
         return 1;
     }
     catch (...) {
         Msg("[RTX Remix Fixes] Exception in UpdateRTXLight\n");
-        LUA->ThrowError("[RTX Remix Fixes] - Exception in light update");
-        return 0;
+        LUA->PushBool(false);
+        return 1;
     }
 }
 

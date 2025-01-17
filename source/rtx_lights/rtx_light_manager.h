@@ -20,6 +20,7 @@ public:
         remixapi_LightHandle handle;
         LightProperties properties;
         bool needsUpdate;
+        bool requiresRecreation;
     };
 
     struct ManagedLight {
@@ -33,7 +34,7 @@ public:
 
     // Light management functions
     remixapi_LightHandle CreateLight(const LightProperties& props);
-    bool UpdateLight(remixapi_LightHandle handle, const LightProperties& props);
+    bool UpdateLight(remixapi_LightHandle handle, const LightProperties& props, remixapi_LightHandle* newHandle = nullptr);
     void DestroyLight(remixapi_LightHandle handle);
     void DrawLights();
 
@@ -60,6 +61,7 @@ private:
     // Member variables
     remix::Interface* m_remix;
     std::vector<ManagedLight> m_lights;
+    std::vector<ManagedLight> m_lightsToDestroy;
     std::queue<PendingUpdate> m_pendingUpdates;
     CRITICAL_SECTION m_lightCS;
     CRITICAL_SECTION m_updateCS;

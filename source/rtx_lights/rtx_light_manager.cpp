@@ -24,6 +24,37 @@ RTXLightManager::~RTXLightManager() {
 void RTXLightManager::BeginFrame() {
     EnterCriticalSection(&m_updateCS);
     m_isFrameActive = true;
+    
+    // Process any pending destroys from last frame
+    for (const auto& light : m_lightsToDestroy) {
+        if (m_remix && light.handle) {
+            m_remix->DestroyLight(light.handle);
+        }
+    }
+    m_lightsToDestroy.clear();
+
+    // Store current lights that need updates for recreation
+    std::vector<remixapi_LightHandle> handlesToUpdate;
+    while (!m_pendingUpdates.empty()) {
+        const auto& update = m_pendingUpdates.front();
+        if (update.needsUpdate) {
+            handlesToUpdate.push_back(update.handle);
+        }
+        m_pendingUpdates.pop();
+    }
+
+    // Remove lights that need updates
+    for (const auto& handleToUpdate : handlesToUpdate) {
+        for (auto it = m_lights.begin(); it != m_lights.end(); ) {
+            if (it->handle == handleToUpdate) {
+                m_lightsToDestroy.push_back(*it);
+                it = m_lights.erase(it);
+            } else {
+                ++it;
+            }
+        }
+    }
+
     ProcessPendingUpdates();
     LeaveCriticalSection(&m_updateCS);
 }
@@ -41,48 +72,58 @@ void RTXLightManager::ProcessPendingUpdates() {
     EnterCriticalSection(&m_lightCS);
     
     try {
-        int processedUpdates = 0;
         while (!m_pendingUpdates.empty()) {
             auto& update = m_pendingUpdates.front();
             
             if (update.needsUpdate) {
-                // Log processing
-                LogMessage("Processing update for light %p\n", update.handle);
+                LogMessage("Creating new light for update %p\n", update.handle);
 
+                // First destroy the old light if it exists
+                for (auto it = m_lights.begin(); it != m_lights.end();) {
+                    if (it->handle == update.handle) {
+                        if (m_remix) {
+                            m_remix->DestroyLight(it->handle);
+                        }
+                        it = m_lights.erase(it);
+                    } else {
+                        ++it;
+                    }
+                }
+
+                // Create new light with updated properties
                 auto sphereLight = CreateSphereLight(update.properties);
                 auto lightInfo = CreateLightInfo(sphereLight);
                 
                 auto result = m_remix->CreateLight(lightInfo);
                 if (result) {
-                    // Find and update existing light
-                    auto it = std::find_if(m_lights.begin(), m_lights.end(),
-                        [handle = update.handle](const ManagedLight& light) { 
-                            return light.handle == handle; 
-                    });
+                    // Add as new light
+                    ManagedLight newLight{};
+                    newLight.handle = result.value();
+                    newLight.properties = update.properties;
+                    newLight.lastUpdateTime = GetTickCount64() / 1000.0f;
+                    newLight.needsUpdate = false;
+                    
+                    m_lights.push_back(newLight);
 
-                    if (it != m_lights.end()) {
-                        // Destroy old light
-                        if (it->handle) {
-                            m_remix->DestroyLight(it->handle);
-                        }
-                        
-                        // Update with new handle and properties
-                        it->handle = result.value();
-                        it->properties = update.properties;
-                        it->lastUpdateTime = GetTickCount64() / 1000.0f;
-                        it->needsUpdate = false;
-                        processedUpdates++;
+                    // Important: Update the original handle to match the new one
+                    update.handle = newLight.handle;
 
-                        LogMessage("Successfully updated light %p\n", it->handle);
-                    }
+                    LogMessage("Created new light %p with updated position (%f, %f, %f)\n", 
+                        newLight.handle, 
+                        update.properties.x,
+                        update.properties.y,
+                        update.properties.z);
                 }
             }
             
             m_pendingUpdates.pop();
         }
 
-        if (processedUpdates > 0) {
-            LogMessage("Processed %d light updates\n", processedUpdates);
+        // Draw all lights immediately after updates
+        for (const auto& light : m_lights) {
+            if (light.handle) {
+                m_remix->DrawLightInstance(light.handle);
+            }
         }
     }
     catch (...) {
@@ -178,27 +219,54 @@ uint64_t RTXLightManager::GenerateLightHash() const {
     return (static_cast<uint64_t>(GetCurrentProcessId()) << 32) | (++counter);
 }
 
-bool RTXLightManager::UpdateLight(remixapi_LightHandle handle, const LightProperties& props) {
+bool RTXLightManager::UpdateLight(remixapi_LightHandle handle, const LightProperties& props, remixapi_LightHandle* newHandle) {
     if (!m_initialized || !m_remix) return false;
 
     EnterCriticalSection(&m_updateCS);
     
     try {
+        // Verify the light exists before queuing update
+        bool lightExists = false;
+        for (const auto& light : m_lights) {
+            if (light.handle == handle) {
+                lightExists = true;
+                break;
+            }
+        }
+
+        if (!lightExists) {
+            LogMessage("Warning: Attempting to update non-existent light %p\n", handle);
+            LeaveCriticalSection(&m_updateCS);
+            return false;
+        }
+
         // Queue the update
         PendingUpdate update;
         update.handle = handle;
         update.properties = props;
         update.needsUpdate = true;
+        update.requiresRecreation = true;
 
-        // Log update for debugging
-        LogMessage("Queueing update for light %p: pos(%f,%f,%f) size:%f brightness:%f color:(%f,%f,%f)\n",
-            handle, props.x, props.y, props.z, props.size, props.brightness, props.r, props.g, props.b);
+        LogMessage("Queueing update for light %p at position (%f, %f, %f)\n", 
+            handle, props.x, props.y, props.z);
 
         m_pendingUpdates.push(update);
 
-        // If we're not in an active frame, process immediately
+        // Process immediately if not in active frame
         if (!m_isFrameActive) {
             ProcessPendingUpdates();
+            
+            // Find the new handle if requested
+            if (newHandle) {
+                for (const auto& light : m_lights) {
+                    if (light.properties.x == props.x && 
+                        light.properties.y == props.y && 
+                        light.properties.z == props.z) {
+                        *newHandle = light.handle;
+                        break;
+                    }
+                }
+            }
         }
     }
     catch (...) {
