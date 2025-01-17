@@ -46,10 +46,12 @@ LUA_FUNCTION(CreateRTXLight) {
         float r = LUA->CheckNumber(6);
         float g = LUA->CheckNumber(7);
         float b = LUA->CheckNumber(8);
+        // Get entity ID from Lua, default to 0 if not provided
+        uint64_t entityID = LUA->IsType(9, Type::NUMBER) ? static_cast<uint64_t>(LUA->GetNumber(9)) : 0;
 
         // Debug print received values
-        Msg("[RTX Light Module] Received values - Pos: %.2f,%.2f,%.2f, Size: %f, Brightness: %f, Color: %f,%f,%f\n",
-            x, y, z, size, brightness, r, g, b);
+        Msg("[RTX Light Module] Received values - Pos: %.2f,%.2f,%.2f, Size: %f, Brightness: %f, Color: %f,%f,%f, EntityID: %llu\n",
+            x, y, z, size, brightness, r, g, b, entityID);
 
         auto props = RTXLightManager::LightProperties();
         props.x = x;
@@ -62,7 +64,7 @@ LUA_FUNCTION(CreateRTXLight) {
         props.b = b / 255.0f;
 
         auto& manager = RTXLightManager::Instance();
-        auto handle = manager.CreateLight(props);
+        auto handle = manager.CreateLight(props, entityID);  // Pass the entityID
         if (!handle) {
             Msg("[RTX Light Module] Failed to create light!\n");
             LUA->ThrowError("[RTX Remix Fixes] - Failed to create light");

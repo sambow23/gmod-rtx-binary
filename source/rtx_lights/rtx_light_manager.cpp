@@ -195,7 +195,14 @@ void RTXLightManager::Shutdown() {
     LeaveCriticalSection(&m_lightCS);
 }
 
-remixapi_LightHandle RTXLightManager::CreateLight(const LightProperties& props) {
+bool RTXLightManager::HasLightForEntity(uint64_t entityID) const {
+    EnterCriticalSection(&m_lightCS);  // Use Critical Section instead of mutex
+    bool exists = m_lightsByEntityID.find(entityID) != m_lightsByEntityID.end();
+    LeaveCriticalSection(&m_lightCS);
+    return exists;
+}
+
+remixapi_LightHandle RTXLightManager::CreateLight(const LightProperties& props, uint64_t entityID) {
     if (!m_initialized || !m_remix) {
         LogMessage("Cannot create light: Manager not initialized\n");
         return nullptr;
@@ -204,6 +211,14 @@ remixapi_LightHandle RTXLightManager::CreateLight(const LightProperties& props) 
     EnterCriticalSection(&m_lightCS);
     
     try {
+        // Check if we already have a light for this entity
+        if (HasLightForEntity(entityID)) {
+            LogMessage("Warning: Attempted to create duplicate light for entity %llu\n", entityID);
+            auto existingHandle = m_lightsByEntityID[entityID].handle;
+            LeaveCriticalSection(&m_lightCS);
+            return existingHandle;
+        }
+
         LogMessage("Creating light at (%f, %f, %f) with size %f\n", 
             props.x, props.y, props.z, props.size);
 
@@ -217,7 +232,7 @@ remixapi_LightHandle RTXLightManager::CreateLight(const LightProperties& props) 
         auto lightInfo = remixapi_LightInfo{};
         lightInfo.sType = REMIXAPI_STRUCT_TYPE_LIGHT_INFO;
         lightInfo.pNext = &sphereLight;
-        lightInfo.hash = GenerateLightHash();  // Ensure unique hash for each light
+        lightInfo.hash = GenerateLightHash();
         lightInfo.radiance = {
             props.r * props.brightness,
             props.g * props.brightness,
@@ -237,8 +252,9 @@ remixapi_LightHandle RTXLightManager::CreateLight(const LightProperties& props) 
         managedLight.lastUpdateTime = GetTickCount64() / 1000.0f;
         managedLight.needsUpdate = false;
 
-        // Add to lights vector
+        // Add to both tracking containers
         m_lights.push_back(managedLight);
+        m_lightsByEntityID[entityID] = managedLight;
         
         LogMessage("Successfully created light handle: %p (Total lights: %d)\n", 
             managedLight.handle, m_lights.size());
@@ -320,11 +336,18 @@ bool RTXLightManager::UpdateLight(remixapi_LightHandle handle, const LightProper
 }
 
 void RTXLightManager::DestroyLight(remixapi_LightHandle handle) {
-    if (!m_initialized || !m_remix) return;
-
-    EnterCriticalSection(&m_lightCS);
+    EnterCriticalSection(&m_lightCS);  // Just use one Critical Section
     
     try {
+        // Find and remove from entity tracking
+        for (auto it = m_lightsByEntityID.begin(); it != m_lightsByEntityID.end(); ) {
+            if (it->second.handle == handle) {
+                it = m_lightsByEntityID.erase(it);
+            } else {
+                ++it;
+            }
+        }
+
         // Find and remove all instances of this handle
         auto it = m_lights.begin();
         while (it != m_lights.end()) {

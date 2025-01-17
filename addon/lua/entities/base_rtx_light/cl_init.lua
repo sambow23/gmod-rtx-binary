@@ -3,6 +3,7 @@ include("shared.lua")
 local activeLights = {}
 local lastUpdate = 0
 local UPDATE_INTERVAL = 0.016 -- ~60fps
+ENT.rtxEntityID = nil
 
 local function IsValidLightHandle(handle)
     return handle ~= nil 
@@ -26,11 +27,15 @@ function ENT:Initialize()
 end
 
 function ENT:CreateRTXLight()
+    -- Ensure we have a unique entity ID
+    if not self.rtxEntityID then
+        self.rtxEntityID = self:EntIndex() + (CurTime() * 1000000) -- Create unique ID
+    end
+
     -- Clean up any existing light for this entity
     if IsValidLightHandle(self.rtxLightHandle) then
         pcall(function() 
             DestroyRTXLight(self.rtxLightHandle)
-            print("[RTX Light] Destroyed existing light handle:", self.rtxLightHandle)
         end)
         self.rtxLightHandle = nil
     end
@@ -42,7 +47,7 @@ function ENT:CreateRTXLight()
     local g = self:GetLightG()
     local b = self:GetLightB()
 
-    -- Create new light
+    -- Create new light with entity ID
     local success, handle = pcall(function()
         return CreateRTXLight(
             pos.x, 
@@ -52,7 +57,8 @@ function ENT:CreateRTXLight()
             brightness,
             r,
             g,
-            b
+            b,
+            self.rtxEntityID -- Pass entity ID to module
         )
     end)
 
@@ -60,8 +66,6 @@ function ENT:CreateRTXLight()
         self.rtxLightHandle = handle
         self.lastUpdatePos = pos
         self.lastUpdateTime = CurTime()
-        activeLights[self:EntIndex()] = self
-        print("[RTX Light] Successfully created light with handle:", handle)
     else
         ErrorNoHalt("[RTX Light] Failed to create light: ", tostring(handle), "\n")
     end
@@ -134,11 +138,14 @@ function ENT:Think()
 end
 
 function ENT:OnRemove()
-    -- Remove from tracking table
-    activeLights[self:EntIndex()] = nil
-
+    if self.rtxEntityID then
+        -- Signal module to forget this entity
+        net.Start("RTXLight_EntityRemoved")
+            net.WriteUInt(self.rtxEntityID, 64)
+        net.SendToServer()
+    end
+    
     if IsValidLightHandle(self.rtxLightHandle) then
-        print("[RTX Light] Cleaning up light handle:", self.rtxLightHandle)
         pcall(function()
             DestroyRTXLight(self.rtxLightHandle)
         end)
