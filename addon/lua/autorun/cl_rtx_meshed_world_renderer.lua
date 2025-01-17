@@ -527,7 +527,7 @@ hook.Add("PopulateToolMenu", "RTXCustomWorldMenu", function()
         panel:CheckBox("Enable Custom World Rendering", "rtx_force_render")
         panel:ControlHelp("Renders the world using chunked meshes")
         
-        panel:NumSlider("Chunk Size", "rtx_chunk_size", 4, 8196, 0)
+        panel:NumSlider("Chunk Size", "rtx_chunk_size", 4, 65536, 0)
         panel:ControlHelp("Size of chunks for mesh combining. Larger = better performance but more memory")
         
         panel:CheckBox("Show Debug Info", "rtx_force_render_debug")
