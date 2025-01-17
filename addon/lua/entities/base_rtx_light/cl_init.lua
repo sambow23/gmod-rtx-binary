@@ -67,41 +67,34 @@ function ENT:OnNetworkVarChanged(name, old, new)
     end
 end
 
-hook.Add("PreRender", "RTXLightFrameSync", function()
-    RTXBeginFrame()
-end)
-
-hook.Add("PostRender", "RTXLightFrameSync", function()
-    RTXEndFrame()
-end)
-
 function ENT:Think()
     if not self.nextUpdate then self.nextUpdate = 0 end
     if CurTime() < self.nextUpdate then return end
     
-    -- Only update if we have a valid light and enough time has passed
+    -- Only update if we have a valid light
     if self.rtxLightHandle then
         local pos = self:GetPos()
         
         -- Check if we actually need to update
         if not self.lastUpdatePos or pos:DistToSqr(self.lastUpdatePos) > 1 then
-            local success = pcall(function()
-                UpdateRTXLight(
-                    self.rtxLightHandle,
-                    pos.x, pos.y, pos.z,
-                    self:GetLightSize() / 10,  -- Scale down size
-                    self:GetLightBrightness() / 100,  -- Convert percentage to 0-1
-                    self:GetLightR(),
-                    self:GetLightG(),
-                    self:GetLightB()
-                )
-            end)
-            
-            if success then
+            local brightness = self:GetLightBrightness() / 100  -- Convert percentage to 0-1
+            local size = self:GetLightSize() / 10  -- Scale down size
+            local r = self:GetLightR()
+            local g = self:GetLightG()
+            local b = self:GetLightB()
+
+            -- Queue update in RTX manager
+            if UpdateRTXLight(
+                self.rtxLightHandle,
+                pos.x, pos.y, pos.z,
+                size,
+                brightness,
+                r, g, b
+            ) then
                 self.lastUpdatePos = pos
                 self.lastUpdateTime = CurTime()
             else
-                -- If update failed, try to recreate the light
+                -- If update failed, recreate light
                 self:CreateRTXLight()
             end
         end
@@ -222,6 +215,23 @@ properties.Add("rtx_light_properties", {
         ent:OpenPropertyMenu()
     end
 })
+
+hook.Add("PreRender", "RTXLightFrameSync", function()
+    RTXBeginFrame()
+    
+    -- Update all active lights
+    for entIndex, light in pairs(activeLights) do
+        if IsValid(light) then
+            light:Think()
+        else
+            activeLights[entIndex] = nil
+        end
+    end
+end)
+
+hook.Add("PostRender", "RTXLightFrameSync", function()
+    RTXEndFrame()
+end)
 
 hook.Add("ShutDown", "CleanupRTXLights", function()
     for _, ent in pairs(activeLights) do

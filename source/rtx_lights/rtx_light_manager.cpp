@@ -41,10 +41,14 @@ void RTXLightManager::ProcessPendingUpdates() {
     EnterCriticalSection(&m_lightCS);
     
     try {
+        int processedUpdates = 0;
         while (!m_pendingUpdates.empty()) {
             auto& update = m_pendingUpdates.front();
             
             if (update.needsUpdate) {
+                // Log processing
+                LogMessage("Processing update for light %p\n", update.handle);
+
                 auto sphereLight = CreateSphereLight(update.properties);
                 auto lightInfo = CreateLightInfo(sphereLight);
                 
@@ -67,11 +71,18 @@ void RTXLightManager::ProcessPendingUpdates() {
                         it->properties = update.properties;
                         it->lastUpdateTime = GetTickCount64() / 1000.0f;
                         it->needsUpdate = false;
+                        processedUpdates++;
+
+                        LogMessage("Successfully updated light %p\n", it->handle);
                     }
                 }
             }
             
             m_pendingUpdates.pop();
+        }
+
+        if (processedUpdates > 0) {
+            LogMessage("Processed %d light updates\n", processedUpdates);
         }
     }
     catch (...) {
@@ -174,10 +185,15 @@ bool RTXLightManager::UpdateLight(remixapi_LightHandle handle, const LightProper
     
     try {
         // Queue the update
-        PendingUpdate update; // Changed from LightUpdate to PendingUpdate
+        PendingUpdate update;
         update.handle = handle;
         update.properties = props;
         update.needsUpdate = true;
+
+        // Log update for debugging
+        LogMessage("Queueing update for light %p: pos(%f,%f,%f) size:%f brightness:%f color:(%f,%f,%f)\n",
+            handle, props.x, props.y, props.z, props.size, props.brightness, props.r, props.g, props.b);
+
         m_pendingUpdates.push(update);
 
         // If we're not in an active frame, process immediately
