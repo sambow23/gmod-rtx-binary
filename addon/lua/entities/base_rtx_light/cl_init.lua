@@ -1,8 +1,13 @@
 include("shared.lua")
 
+local activeLights = {}
+
 function ENT:Initialize()
     self:SetNoDraw(true)
     self:DrawShadow(false)
+    
+    -- Register this light in our tracking table
+    activeLights[self:EntIndex()] = self
     
     -- Delay light creation to ensure networked values are received
     timer.Simple(0.1, function()
@@ -13,6 +18,7 @@ function ENT:Initialize()
 end
 
 function ENT:CreateRTXLight()
+    -- Clean up any existing light for this entity
     if self.rtxLightHandle then
         pcall(function() 
             DestroyRTXLight(self.rtxLightHandle)
@@ -28,9 +34,7 @@ function ENT:CreateRTXLight()
     local g = self:GetLightG()
     local b = self:GetLightB()
 
-    print(string.format("[RTX Light Entity] Creating light - Pos: %.2f,%.2f,%.2f, Size: %f, Brightness: %f, Color: %d,%d,%d",
-        pos.x, pos.y, pos.z, size, brightness, r, g, b))
-
+    -- Create new light
     local success, handle = pcall(function()
         return CreateRTXLight(
             pos.x, 
@@ -48,6 +52,7 @@ function ENT:CreateRTXLight()
         self.rtxLightHandle = handle
         self.lastUpdatePos = pos
         self.lastUpdateTime = CurTime()
+        activeLights[self:EntIndex()] = self
         print("[RTX Light] Successfully created light with handle:", handle)
     else
         ErrorNoHalt("[RTX Light] Failed to create light: ", tostring(handle), "\n")
@@ -100,6 +105,9 @@ function ENT:Think()
 end
 
 function ENT:OnRemove()
+    -- Remove from tracking table
+    activeLights[self:EntIndex()] = nil
+
     if self.rtxLightHandle then
         print("[RTX Light] Cleaning up light handle:", self.rtxLightHandle)
         pcall(function()
@@ -111,11 +119,19 @@ end
 
 net.Receive("RTXLight_Cleanup", function()
     local ent = net.ReadEntity()
-    if IsValid(ent) and ent.rtxLightHandle then
-        ent:OnRemove()
+    if IsValid(ent) then
+        -- Remove from tracking table
+        activeLights[ent:EntIndex()] = nil
+        
+        -- Cleanup RTX light
+        if ent.rtxLightHandle then
+            pcall(function()
+                DestroyRTXLight(ent.rtxLightHandle)
+            end)
+            ent.rtxLightHandle = nil
+        end
     end
 end)
-
 
 -- Simple property menu
 function ENT:OpenPropertyMenu()
@@ -197,3 +213,21 @@ properties.Add("rtx_light_properties", {
         ent:OpenPropertyMenu()
     end
 })
+
+hook.Add("ShutDown", "CleanupRTXLights", function()
+    for _, ent in pairs(activeLights) do
+        if IsValid(ent) then
+            ent:OnRemove()
+        end
+    end
+    table.Empty(activeLights)
+end)
+
+hook.Add("PreCleanupMap", "CleanupRTXLights", function()
+    for _, ent in pairs(activeLights) do
+        if IsValid(ent) then
+            ent:OnRemove()
+        end
+    end
+    table.Empty(activeLights)
+end)

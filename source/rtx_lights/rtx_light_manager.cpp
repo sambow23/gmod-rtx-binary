@@ -110,28 +110,49 @@ bool RTXLightManager::UpdateLight(remixapi_LightHandle handle, const LightProper
     EnterCriticalSection(&m_lightCS);
     
     try {
+        // First try to find existing light
         auto it = std::find_if(m_lights.begin(), m_lights.end(),
             [handle](const ManagedLight& light) { return light.handle == handle; });
 
         if (it != m_lights.end()) {
-            // Create new light with updated properties
-            auto sphereLight = CreateSphereLight(props);
-            auto lightInfo = CreateLightInfo(sphereLight);
-            
-            auto result = m_remix->CreateLight(lightInfo);
-            if (!result) {
-                LeaveCriticalSection(&m_lightCS);
-                return false;
-            }
+            // Check if we need to update based on significant changes
+            const auto& currentProps = it->properties;
+            bool needsUpdate = 
+                std::abs(currentProps.x - props.x) > 0.01f ||
+                std::abs(currentProps.y - props.y) > 0.01f ||
+                std::abs(currentProps.z - props.z) > 0.01f ||
+                std::abs(currentProps.size - props.size) > 0.01f ||
+                std::abs(currentProps.brightness - props.brightness) > 0.01f ||
+                std::abs(currentProps.r - props.r) > 0.01f ||
+                std::abs(currentProps.g - props.g) > 0.01f ||
+                std::abs(currentProps.b - props.b) > 0.01f;
 
-            // Destroy old light
-            m_remix->DestroyLight(it->handle);
-            
-            // Update managed light
-            it->handle = result.value();
-            it->properties = props;
-            it->lastUpdateTime = GetTickCount64() / 1000.0f;
-            it->needsUpdate = false;
+            if (needsUpdate) {
+                // Ensure old light is destroyed before creating new one
+                if (it->handle) {
+                    m_remix->DestroyLight(it->handle);
+                    it->handle = nullptr;
+                }
+
+                // Create new light with updated properties
+                auto sphereLight = CreateSphereLight(props);
+                auto lightInfo = CreateLightInfo(sphereLight);
+                
+                auto result = m_remix->CreateLight(lightInfo);
+                if (!result) {
+                    LogMessage("Failed to create updated light\n");
+                    LeaveCriticalSection(&m_lightCS);
+                    return false;
+                }
+
+                // Update managed light
+                it->handle = result.value();
+                it->properties = props;
+                it->lastUpdateTime = GetTickCount64() / 1000.0f;
+                it->needsUpdate = false;
+
+                LogMessage("Successfully updated light handle: %p\n", it->handle);
+            }
 
             LeaveCriticalSection(&m_lightCS);
             return true;
@@ -151,15 +172,18 @@ void RTXLightManager::DestroyLight(remixapi_LightHandle handle) {
     EnterCriticalSection(&m_lightCS);
     
     try {
-        auto it = std::find_if(m_lights.begin(), m_lights.end(),
-            [handle](const ManagedLight& light) { return light.handle == handle; });
-
-        if (it != m_lights.end()) {
-            LogMessage("Destroying light handle: %p\n", handle);
-            m_remix->DestroyLight(it->handle);
-            m_lights.erase(it);
-            LogMessage("Light destroyed, remaining lights: %d\n", m_lights.size());
+        // Find and remove all instances of this handle
+        auto it = m_lights.begin();
+        while (it != m_lights.end()) {
+            if (it->handle == handle) {
+                LogMessage("Destroying light handle: %p\n", handle);
+                m_remix->DestroyLight(it->handle);
+                it = m_lights.erase(it);
+            } else {
+                ++it;
+            }
         }
+        LogMessage("Light cleanup complete, remaining lights: %d\n", m_lights.size());
     }
     catch (...) {
         LogMessage("Exception in DestroyLight\n");
@@ -168,30 +192,67 @@ void RTXLightManager::DestroyLight(remixapi_LightHandle handle) {
     LeaveCriticalSection(&m_lightCS);
 }
 
+void RTXLightManager::CleanupInvalidLights() {
+    try {
+        auto it = m_lights.begin();
+        while (it != m_lights.end()) {
+            bool isValid = false;
+            if (it->handle) {
+                // Try to draw the light as a validity check
+                auto result = m_remix->DrawLightInstance(it->handle);
+                isValid = static_cast<bool>(result); // Use the bool operator
+            }
+
+            if (!isValid) {
+                LogMessage("Removing invalid light handle: %p\n", it->handle);
+                if (it->handle) {
+                    m_remix->DestroyLight(it->handle);
+                }
+                it = m_lights.erase(it);
+            } else {
+                ++it;
+            }
+        }
+    }
+    catch (...) {
+        LogMessage("Exception in CleanupInvalidLights\n");
+    }
+}
+
 void RTXLightManager::DrawLights() {
     if (!m_initialized || !m_remix) return;
 
     EnterCriticalSection(&m_lightCS);
     
     try {
-        // Only print debug info every few seconds and if the light count changed
-        static size_t lastLightCount = 0;
-        static float lastDebugTime = 0;
         float currentTime = GetTickCount64() / 1000.0f;
-        
-        if (m_lights.size() != lastLightCount && currentTime - lastDebugTime > 2.0f) {
-            Msg("[RTX Light Manager] Drawing %d lights\n", m_lights.size());
-            lastLightCount = m_lights.size();
-            lastDebugTime = currentTime;
+        static float lastCleanupTime = 0;
+
+        // Periodic cleanup of invalid lights
+        if (currentTime - lastCleanupTime > 5.0f) {
+            CleanupInvalidLights();
+            lastCleanupTime = currentTime;
         }
 
+        // Draw all valid lights
+        size_t validLightCount = 0;
         for (const auto& light : m_lights) {
             if (light.handle) {
                 auto result = m_remix->DrawLightInstance(light.handle);
-                if (!result && currentTime - lastDebugTime > 2.0f) {
-                    Msg("[RTX Light Manager] Failed to draw light handle: %p\n", light.handle);
+                if (result) {
+                    validLightCount++;
+                } else {
+                    LogMessage("Failed to draw light handle: %p\n", light.handle);
                 }
             }
+        }
+
+        // Log status periodically
+        static size_t lastReportedCount = 0;
+        if (validLightCount != lastReportedCount) {
+            LogMessage("Drew %zu valid lights out of %zu total\n", 
+                validLightCount, m_lights.size());
+            lastReportedCount = validLightCount;
         }
     }
     catch (...) {

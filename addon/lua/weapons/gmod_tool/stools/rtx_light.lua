@@ -35,8 +35,23 @@ function TOOL:LeftClick(trace)
     local g = math.Clamp(self:GetClientNumber("g", 255), 0, 255)
     local b = math.Clamp(self:GetClientNumber("b", 255), 0, 255)
 
-    print(string.format("[RTX Light Tool] Creating light - Brightness: %f, Size: %f, Color: %d,%d,%d",
-        brightness, size, r, g, b))
+    -- Check for existing lights in the same position and remove them
+    local existingLights = ents.FindInSphere(pos, 5)
+    for _, ent in ipairs(existingLights) do
+        if IsValid(ent) and ent:GetClass() == "base_rtx_light" then
+            -- Ensure cleanup happens before removal
+            net.Start("RTXLight_Cleanup")
+                net.WriteEntity(ent)
+            net.Broadcast()
+            
+            -- Wait a frame before removing to ensure cleanup message is processed
+            timer.Simple(0, function()
+                if IsValid(ent) then
+                    ent:Remove()
+                end
+            end)
+        end
+    end
 
     -- Create entity without effects
     local ent = ents.Create("base_rtx_light")
@@ -64,7 +79,6 @@ function TOOL:LeftClick(trace)
         undo.SetCustomUndoText("Undone RTX Light")
         undo.AddFunction(function()
             if IsValid(ent) then
-                -- Ensure cleanup happens before entity removal
                 net.Start("RTXLight_Cleanup")
                     net.WriteEntity(ent)
                 net.Broadcast()
@@ -114,7 +128,7 @@ end
 
 if CLIENT then
     language.Add("tool.rtx_light.name", "RTX Light")
-    language.Add("tool.rtx_light.desc", "Create RTX-enabled lights")
+    language.Add("tool.rtx_light.desc", "Create RTX Remix API lights")
     language.Add("tool.rtx_light.0", "Left click to create a light. Right click to remove. Reload to copy settings.")
 
     function TOOL.BuildCPanel(panel)
