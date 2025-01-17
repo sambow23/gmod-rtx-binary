@@ -186,11 +186,26 @@ function ENT:OpenPropertyMenu()
     brightnessSlider:SetDecimals(0)
     brightnessSlider:SetValue(self:GetLightBrightness())
     brightnessSlider.OnValueChanged = function(_, value)
+        -- Send to server
         net.Start("RTXLight_UpdateProperty")
             net.WriteEntity(self)
             net.WriteString("brightness")
             net.WriteFloat(value)
         net.SendToServer()
+        
+        -- Force immediate local update
+        if IsValid(self) and IsValidLightHandle(self.rtxLightHandle) then
+            local pos = self:GetPos()
+            local size = self:GetLightSize() / 10
+            local brightness = value / 100
+            local r = self:GetLightR()
+            local g = self:GetLightG()
+            local b = self:GetLightB()
+            
+            -- Call UpdateRTXLight directly, without pcall
+            self:Think()  -- Use the existing Think function's update logic
+            self.lastUpdatePos = nil  -- Force an update
+        end
     end
     
     -- Size Slider
@@ -207,6 +222,12 @@ function ENT:OpenPropertyMenu()
             net.WriteString("size")
             net.WriteFloat(value)
         net.SendToServer()
+        
+        -- Force immediate local update
+        if IsValid(self) and IsValidLightHandle(self.rtxLightHandle) then
+            self:Think()  -- Use the existing Think function's update logic
+            self.lastUpdatePos = nil  -- Force an update
+        end
     end
     
     -- Color Mixer
@@ -224,6 +245,12 @@ function ENT:OpenPropertyMenu()
             net.WriteUInt(color.g, 8)
             net.WriteUInt(color.b, 8)
         net.SendToServer()
+        
+        -- Force immediate local update
+        if IsValid(self) and IsValidLightHandle(self.rtxLightHandle) then
+            self:Think()  -- Use the existing Think function's update logic
+            self.lastUpdatePos = nil  -- Force an update
+        end
     end
     
     self.PropertyPanel = frame
