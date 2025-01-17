@@ -3,6 +3,8 @@ include("shared.lua")
 local activeLights = {}
 local lastUpdate = 0
 local UPDATE_INTERVAL = 0.016 -- ~60fps
+local activeRTXLights = {}
+
 ENT.rtxEntityID = nil
 
 local function IsValidLightHandle(handle)
@@ -21,7 +23,7 @@ function ENT:Initialize()
     self:DrawShadow(false)
     
     -- Register this light in our tracking table
-    activeLights[self:EntIndex()] = self
+    activeRTXLights[self:EntIndex()] = self
     
     -- Delay light creation to ensure networked values are received
     timer.Simple(0.1, function()
@@ -143,20 +145,29 @@ function ENT:Think()
 end
 
 function ENT:OnRemove()
-    if self.rtxEntityID then
-        -- Signal module to forget this entity
-        net.Start("RTXLight_EntityRemoved")
-            net.WriteUInt(self.rtxEntityID, 64)
-        net.SendToServer()
-    end
-    
-    if IsValidLightHandle(self.rtxLightHandle) then
+    -- Remove from tracking
+    activeRTXLights[self:EntIndex()] = nil
+
+    if self.rtxLightHandle then
         pcall(function()
             DestroyRTXLight(self.rtxLightHandle)
         end)
         self.rtxLightHandle = nil
     end
 end
+
+-- Add a hook to handle map cleanup
+hook.Add("PreCleanupMap", "RTXLight_PreCleanupMap", function()
+    for entIndex, ent in pairs(activeRTXLights) do
+        if IsValid(ent) and ent.rtxLightHandle then
+            pcall(function()
+                DestroyRTXLight(ent.rtxLightHandle)
+            end)
+            ent.rtxLightHandle = nil
+        end
+    end
+    table.Empty(activeRTXLights)
+end)
 
 net.Receive("RTXLight_Cleanup", function()
     local ent = net.ReadEntity()
@@ -326,5 +337,52 @@ end)
 timer.Create("RTXLightStateValidation", 5, 0, function()
     if DrawRTXLights then  -- Check if module is loaded
         DrawRTXLights()  -- This will trigger ValidateState
+    end
+end)
+
+hook.Add("ShutDown", "RTXLight_Cleanup", function()
+    for entIndex, ent in pairs(activeRTXLights) do
+        if IsValid(ent) and ent.rtxLightHandle then
+            pcall(function()
+                DestroyRTXLight(ent.rtxLightHandle)
+            end)
+            ent.rtxLightHandle = nil
+        end
+    end
+    table.Empty(activeRTXLights)
+end)
+
+-- Add validation timer with error handling
+timer.Create("RTXLightValidation", 5, 0, function()
+    pcall(function()
+        -- Clean up any invalid entries in tracking table
+        for entIndex, ent in pairs(activeRTXLights) do
+            if not IsValid(ent) or not ent.rtxLightHandle then
+                activeRTXLights[entIndex] = nil
+            end
+        end
+
+        -- Check for lights that need recreation
+        for _, ent in ipairs(ents.FindByClass("base_rtx_light")) do
+            if IsValid(ent) then
+                if not ent.rtxLightHandle and ent.CreateRTXLight then
+                    ent:CreateRTXLight()
+                end
+            end
+        end
+    end)
+end)
+
+-- Add entity removal hook for more reliable cleanup
+hook.Add("EntityRemoved", "RTXLight_EntityCleanup", function(ent)
+    if ent:GetClass() == "base_rtx_light" then
+        -- Ensure cleanup happens even if OnRemove doesn't fire
+        if ent.rtxLightHandle then
+            pcall(function()
+                DestroyRTXLight(ent.rtxLightHandle)
+            end)
+            ent.rtxLightHandle = nil
+        end
+        activeRTXLights[ent:EntIndex()] = nil
     end
 end)

@@ -38,24 +38,6 @@ function TOOL:LeftClick(trace)
     local g = math.Clamp(self:GetClientNumber("g", 255), 0, 255)
     local b = math.Clamp(self:GetClientNumber("b", 255), 0, 255)
 
-    -- Check for existing lights in the same position and remove them
-    local existingLights = ents.FindInSphere(pos, 5)
-    for _, ent in ipairs(existingLights) do
-        if IsValid(ent) and ent:GetClass() == "base_rtx_light" then
-            -- Ensure cleanup happens before removal
-            net.Start("RTXLight_Cleanup")
-                net.WriteEntity(ent)
-            net.Broadcast()
-            
-            -- Wait a frame before removing to ensure cleanup message is processed
-            timer.Simple(0, function()
-                if IsValid(ent) then
-                    ent:Remove()
-                end
-            end)
-        end
-    end
-
     -- Create entity without effects
     local ent = ents.Create("base_rtx_light")
     if not IsValid(ent) then return false end
@@ -75,24 +57,11 @@ function TOOL:LeftClick(trace)
     ent:Spawn()
     ent:Activate()
 
-    -- Create undo with custom callback
+    -- Create undo without network messages
     undo.Create("RTX Light")
         undo.AddEntity(ent)
         undo.SetPlayer(ply)
         undo.SetCustomUndoText("Undone RTX Light")
-        undo.AddFunction(function()
-            if IsValid(ent) then
-                net.Start("RTXLight_Cleanup")
-                    net.WriteEntity(ent)
-                net.Broadcast()
-                -- Small delay to ensure cleanup message is processed
-                timer.Simple(0.1, function()
-                    if IsValid(ent) then
-                        ent:Remove()
-                    end
-                end)
-            end
-        end)
     undo.Finish()
 
     -- Add to cleanup
