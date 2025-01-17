@@ -66,6 +66,30 @@ void RTXLightManager::EndFrame() {
     LeaveCriticalSection(&m_updateCS);
 }
 
+bool RTXLightManager::IsValidHandle(remixapi_LightHandle handle) const {
+    if (!m_initialized || !m_remix || !handle) {
+        return false;
+    }
+
+    // Check if handle exists in our managed lights
+    for (const auto& light : m_lights) {
+        if (light.handle == handle) {
+            return true;
+        }
+    }
+
+    // Check pending updates
+    std::queue<PendingUpdate> tempQueue = m_pendingUpdates;
+    while (!tempQueue.empty()) {
+        if (tempQueue.front().handle == handle) {
+            return true;
+        }
+        tempQueue.pop();
+    }
+
+    return false;
+}
+
 void RTXLightManager::ProcessPendingUpdates() {
     if (!m_initialized || !m_remix) return;
 
@@ -75,13 +99,21 @@ void RTXLightManager::ProcessPendingUpdates() {
         while (!m_pendingUpdates.empty()) {
             auto& update = m_pendingUpdates.front();
             
-            if (update.needsUpdate) {
-                LogMessage("Creating new light for update %p\n", update.handle);
+            if (update.needsUpdate && update.handle) {
+                LogMessage("Processing update for light %p\n", update.handle);
+
+                // Validate handle before processing
+                if (!IsValidHandle(update.handle)) {
+                    LogMessage("Warning: Skipping update for invalid handle %p\n", update.handle);
+                    m_pendingUpdates.pop();
+                    continue;
+                }
 
                 // First destroy the old light if it exists
                 for (auto it = m_lights.begin(); it != m_lights.end();) {
                     if (it->handle == update.handle) {
                         if (m_remix) {
+                            LogMessage("Destroying old light %p\n", it->handle);
                             m_remix->DestroyLight(it->handle);
                         }
                         it = m_lights.erase(it);
@@ -113,6 +145,8 @@ void RTXLightManager::ProcessPendingUpdates() {
                         update.properties.x,
                         update.properties.y,
                         update.properties.z);
+                } else {
+                    LogMessage("Failed to create new light during update\n");
                 }
             }
             
@@ -122,12 +156,18 @@ void RTXLightManager::ProcessPendingUpdates() {
         // Draw all lights immediately after updates
         for (const auto& light : m_lights) {
             if (light.handle) {
-                m_remix->DrawLightInstance(light.handle);
+                auto drawResult = m_remix->DrawLightInstance(light.handle);
+                if (!static_cast<bool>(drawResult)) {
+                    LogMessage("Failed to draw light handle: %p\n", light.handle);
+                }
             }
         }
     }
+    catch (const std::exception& e) {
+        LogMessage("Exception in ProcessPendingUpdates: %s\n", e.what());
+    }
     catch (...) {
-        LogMessage("Exception in ProcessPendingUpdates\n");
+        LogMessage("Unknown exception in ProcessPendingUpdates\n");
     }
     
     LeaveCriticalSection(&m_lightCS);

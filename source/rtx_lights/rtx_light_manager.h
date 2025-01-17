@@ -35,6 +35,7 @@ public:
     // Light management functions
     remixapi_LightHandle CreateLight(const LightProperties& props);
     bool UpdateLight(remixapi_LightHandle handle, const LightProperties& props, remixapi_LightHandle* newHandle = nullptr);
+    bool IsValidHandle(remixapi_LightHandle handle) const;
     void DestroyLight(remixapi_LightHandle handle);
     void DrawLights();
 

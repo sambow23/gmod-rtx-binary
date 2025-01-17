@@ -89,9 +89,33 @@ LUA_FUNCTION(UpdateRTXLight) {
             return 1;
         }
 
+        // Validate userdata type
+        if (!LUA->IsType(1, Type::USERDATA)) {
+            Msg("[RTX Remix Fixes] First argument must be userdata\n");
+            LUA->PushBool(false);
+            return 1;
+        }
+
         auto handle = static_cast<remixapi_LightHandle>(LUA->GetUserdata(1));
         if (!handle) {
-            Msg("[RTX Remix Fixes] Invalid light handle\n");
+            Msg("[RTX Remix Fixes] Invalid light handle (null)\n");
+            LUA->PushBool(false);
+            return 1;
+        }
+
+        // Additional handle validation
+        bool isValidHandle = false;
+        try {
+            auto& manager = RTXLightManager::Instance();
+            isValidHandle = manager.IsValidHandle(handle);
+        } catch (...) {
+            Msg("[RTX Remix Fixes] Exception checking handle validity\n");
+            LUA->PushBool(false);
+            return 1;
+        }
+
+        if (!isValidHandle) {
+            Msg("[RTX Remix Fixes] Invalid light handle (not found)\n");
             LUA->PushBool(false);
             return 1;
         }

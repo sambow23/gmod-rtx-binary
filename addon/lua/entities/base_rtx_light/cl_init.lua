@@ -4,6 +4,12 @@ local activeLights = {}
 local lastUpdate = 0
 local UPDATE_INTERVAL = 0.016 -- ~60fps
 
+local function IsValidLightHandle(handle)
+    return handle ~= nil 
+        and type(handle) == "userdata" 
+        and pcall(function() return handle ~= NULL end)  -- Safe check for nil/NULL
+end
+
 function ENT:Initialize()
     self:SetNoDraw(true)
     self:DrawShadow(false)
@@ -21,7 +27,7 @@ end
 
 function ENT:CreateRTXLight()
     -- Clean up any existing light for this entity
-    if self.rtxLightHandle then
+    if IsValidLightHandle(self.rtxLightHandle) then
         pcall(function() 
             DestroyRTXLight(self.rtxLightHandle)
             print("[RTX Light] Destroyed existing light handle:", self.rtxLightHandle)
@@ -50,7 +56,7 @@ function ENT:CreateRTXLight()
         )
     end)
 
-    if success and handle then
+    if success and IsValidLightHandle(handle) then
         self.rtxLightHandle = handle
         self.lastUpdatePos = pos
         self.lastUpdateTime = CurTime()
@@ -73,6 +79,13 @@ function ENT:Think()
     
     -- Only update if we have a valid light
     if self.rtxLightHandle then
+        -- Use our custom validation instead of IsValid
+        if not IsValidLightHandle(self.rtxLightHandle) then
+            self.rtxLightHandle = nil
+            self:CreateRTXLight()
+            return
+        end
+
         local pos = self:GetPos()
         
         -- Check if we actually need to update
@@ -83,24 +96,32 @@ function ENT:Think()
             local g = self:GetLightG()
             local b = self:GetLightB()
 
-            -- Queue update in RTX manager
-            local success, newHandle = UpdateRTXLight(
-                self.rtxLightHandle,
-                pos.x, pos.y, pos.z,
-                size,
-                brightness,
-                r, g, b
-            )
+            -- Protected call for update
+            local success, err = pcall(function()
+                local updateSuccess, newHandle = UpdateRTXLight(
+                    self.rtxLightHandle,
+                    pos.x, pos.y, pos.z,
+                    size,
+                    brightness,
+                    r, g, b
+                )
 
-            if success then
-                -- Update handle if it changed after recreation
-                if newHandle and newHandle ~= self.rtxLightHandle then
-                    self.rtxLightHandle = newHandle
+                if updateSuccess then
+                    -- Update handle if it changed after recreation
+                    if newHandle and IsValidLightHandle(newHandle) and newHandle ~= self.rtxLightHandle then
+                        self.rtxLightHandle = newHandle
+                    end
+                    self.lastUpdatePos = pos
+                    self.lastUpdateTime = CurTime()
+                else
+                    -- If update failed, try to recreate light
+                    self:CreateRTXLight()
                 end
-                self.lastUpdatePos = pos
-                self.lastUpdateTime = CurTime()
-            else
-                -- If update failed, try to recreate light
+            end)
+
+            if not success then
+                print("[RTX Light] Update failed: ", err)
+                self.rtxLightHandle = nil
                 self:CreateRTXLight()
             end
         end
@@ -116,7 +137,7 @@ function ENT:OnRemove()
     -- Remove from tracking table
     activeLights[self:EntIndex()] = nil
 
-    if self.rtxLightHandle then
+    if IsValidLightHandle(self.rtxLightHandle) then
         print("[RTX Light] Cleaning up light handle:", self.rtxLightHandle)
         pcall(function()
             DestroyRTXLight(self.rtxLightHandle)
