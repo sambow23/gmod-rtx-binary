@@ -31,6 +31,22 @@ local EyePos = EyePos
 
 -- Utility Functions
 
+local function DisableWorldRendering()
+    hook.Add("PreDrawWorld", "RTXHideWorld", function()
+        render.OverrideDepthEnable(true, false)
+        return true -- Prevent original world drawing
+    end)
+    
+    hook.Add("PostDrawWorld", "RTXHideWorld", function()
+        render.OverrideDepthEnable(false)
+    end)
+end
+
+local function EnableWorldRendering()
+    hook.Remove("PreDrawWorld", "RTXHideWorld") 
+    hook.Remove("PostDrawWorld", "RTXHideWorld")
+end
+
 local function IsBrushEntity(face)
     if not face then return false end
     
@@ -421,7 +437,15 @@ local function EnableCustomRendering()
     if isEnabled then return end
     isEnabled = true
 
-    RunConsoleCommand("r_drawworld", "0")
+    -- Disable world rendering using render.OverrideDepthEnable
+    hook.Add("PreDrawWorld", "RTXHideWorld", function()
+        render.OverrideDepthEnable(true, false)
+        return true
+    end)
+    
+    hook.Add("PostDrawWorld", "RTXHideWorld", function()
+        render.OverrideDepthEnable(false)
+    end)
     
     hook.Add("PreDrawOpaqueRenderables", "RTXCustomWorld", function()
         RenderCustomWorld(false)
@@ -436,8 +460,8 @@ local function DisableCustomRendering()
     if not isEnabled then return end
     isEnabled = false
 
-    RunConsoleCommand("r_drawworld", "1")
-    
+    hook.Remove("PreDrawWorld", "RTXHideWorld")
+    hook.Remove("PostDrawWorld", "RTXHideWorld")
     hook.Remove("PreDrawOpaqueRenderables", "RTXCustomWorld")
     hook.Remove("PreDrawTranslucentRenderables", "RTXCustomWorld")
 end
