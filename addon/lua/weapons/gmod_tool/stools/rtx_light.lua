@@ -1,5 +1,7 @@
+local COOLDOWN_TIME = 0.1
+
 TOOL.Category = "Lighting"
-TOOL.Name = "RTX Light"
+TOOL.Name = "Remix API Light"
 TOOL.Command = nil
 TOOL.ConfigName = ""
 
@@ -8,7 +10,8 @@ TOOL.ClientConVar = {
     ["size"] = "200",
     ["r"] = "255",
     ["g"] = "255",
-    ["b"] = "255"
+    ["b"] = "255",
+    ["update_rate"] = "60"
 }
 
 function TOOL:LeftClick(trace)

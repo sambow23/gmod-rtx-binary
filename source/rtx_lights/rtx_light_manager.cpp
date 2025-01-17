@@ -9,13 +9,76 @@ RTXLightManager& RTXLightManager::Instance() {
 
 RTXLightManager::RTXLightManager() 
     : m_remix(nullptr)
-    , m_initialized(false) {
+    , m_initialized(false)
+    , m_isFrameActive(false) {
     InitializeCriticalSection(&m_lightCS);
+    InitializeCriticalSection(&m_updateCS);
 }
 
 RTXLightManager::~RTXLightManager() {
     Shutdown();
     DeleteCriticalSection(&m_lightCS);
+    DeleteCriticalSection(&m_updateCS);
+}
+
+void RTXLightManager::BeginFrame() {
+    EnterCriticalSection(&m_updateCS);
+    m_isFrameActive = true;
+    ProcessPendingUpdates();
+    LeaveCriticalSection(&m_updateCS);
+}
+
+void RTXLightManager::EndFrame() {
+    EnterCriticalSection(&m_updateCS);
+    m_isFrameActive = false;
+    ProcessPendingUpdates();
+    LeaveCriticalSection(&m_updateCS);
+}
+
+void RTXLightManager::ProcessPendingUpdates() {
+    if (!m_initialized || !m_remix) return;
+
+    EnterCriticalSection(&m_lightCS);
+    
+    try {
+        while (!m_pendingUpdates.empty()) {
+            auto& update = m_pendingUpdates.front();
+            
+            if (update.needsUpdate) {
+                auto sphereLight = CreateSphereLight(update.properties);
+                auto lightInfo = CreateLightInfo(sphereLight);
+                
+                auto result = m_remix->CreateLight(lightInfo);
+                if (result) {
+                    // Find and update existing light
+                    auto it = std::find_if(m_lights.begin(), m_lights.end(),
+                        [handle = update.handle](const ManagedLight& light) { 
+                            return light.handle == handle; 
+                    });
+
+                    if (it != m_lights.end()) {
+                        // Destroy old light
+                        if (it->handle) {
+                            m_remix->DestroyLight(it->handle);
+                        }
+                        
+                        // Update with new handle and properties
+                        it->handle = result.value();
+                        it->properties = update.properties;
+                        it->lastUpdateTime = GetTickCount64() / 1000.0f;
+                        it->needsUpdate = false;
+                    }
+                }
+            }
+            
+            m_pendingUpdates.pop();
+        }
+    }
+    catch (...) {
+        LogMessage("Exception in ProcessPendingUpdates\n");
+    }
+    
+    LeaveCriticalSection(&m_lightCS);
 }
 
 void RTXLightManager::Initialize(remix::Interface* remixInterface) {
@@ -107,63 +170,29 @@ uint64_t RTXLightManager::GenerateLightHash() const {
 bool RTXLightManager::UpdateLight(remixapi_LightHandle handle, const LightProperties& props) {
     if (!m_initialized || !m_remix) return false;
 
-    EnterCriticalSection(&m_lightCS);
+    EnterCriticalSection(&m_updateCS);
     
     try {
-        // First try to find existing light
-        auto it = std::find_if(m_lights.begin(), m_lights.end(),
-            [handle](const ManagedLight& light) { return light.handle == handle; });
+        // Queue the update
+        PendingUpdate update; // Changed from LightUpdate to PendingUpdate
+        update.handle = handle;
+        update.properties = props;
+        update.needsUpdate = true;
+        m_pendingUpdates.push(update);
 
-        if (it != m_lights.end()) {
-            // Check if we need to update based on significant changes
-            const auto& currentProps = it->properties;
-            bool needsUpdate = 
-                std::abs(currentProps.x - props.x) > 0.01f ||
-                std::abs(currentProps.y - props.y) > 0.01f ||
-                std::abs(currentProps.z - props.z) > 0.01f ||
-                std::abs(currentProps.size - props.size) > 0.01f ||
-                std::abs(currentProps.brightness - props.brightness) > 0.01f ||
-                std::abs(currentProps.r - props.r) > 0.01f ||
-                std::abs(currentProps.g - props.g) > 0.01f ||
-                std::abs(currentProps.b - props.b) > 0.01f;
-
-            if (needsUpdate) {
-                // Ensure old light is destroyed before creating new one
-                if (it->handle) {
-                    m_remix->DestroyLight(it->handle);
-                    it->handle = nullptr;
-                }
-
-                // Create new light with updated properties
-                auto sphereLight = CreateSphereLight(props);
-                auto lightInfo = CreateLightInfo(sphereLight);
-                
-                auto result = m_remix->CreateLight(lightInfo);
-                if (!result) {
-                    LogMessage("Failed to create updated light\n");
-                    LeaveCriticalSection(&m_lightCS);
-                    return false;
-                }
-
-                // Update managed light
-                it->handle = result.value();
-                it->properties = props;
-                it->lastUpdateTime = GetTickCount64() / 1000.0f;
-                it->needsUpdate = false;
-
-                LogMessage("Successfully updated light handle: %p\n", it->handle);
-            }
-
-            LeaveCriticalSection(&m_lightCS);
-            return true;
+        // If we're not in an active frame, process immediately
+        if (!m_isFrameActive) {
+            ProcessPendingUpdates();
         }
     }
     catch (...) {
         LogMessage("Exception in UpdateLight\n");
+        LeaveCriticalSection(&m_updateCS);
+        return false;
     }
 
-    LeaveCriticalSection(&m_lightCS);
-    return false;
+    LeaveCriticalSection(&m_updateCS);
+    return true;
 }
 
 void RTXLightManager::DestroyLight(remixapi_LightHandle handle) {
@@ -225,34 +254,18 @@ void RTXLightManager::DrawLights() {
     EnterCriticalSection(&m_lightCS);
     
     try {
-        float currentTime = GetTickCount64() / 1000.0f;
-        static float lastCleanupTime = 0;
-
-        // Periodic cleanup of invalid lights
-        if (currentTime - lastCleanupTime > 5.0f) {
-            CleanupInvalidLights();
-            lastCleanupTime = currentTime;
+        // Process any pending updates before drawing
+        if (!m_isFrameActive) {
+            ProcessPendingUpdates();
         }
 
-        // Draw all valid lights
-        size_t validLightCount = 0;
         for (const auto& light : m_lights) {
             if (light.handle) {
                 auto result = m_remix->DrawLightInstance(light.handle);
-                if (result) {
-                    validLightCount++;
-                } else {
+                if (!static_cast<bool>(result)) {
                     LogMessage("Failed to draw light handle: %p\n", light.handle);
                 }
             }
-        }
-
-        // Log status periodically
-        static size_t lastReportedCount = 0;
-        if (validLightCount != lastReportedCount) {
-            LogMessage("Drew %zu valid lights out of %zu total\n", 
-                validLightCount, m_lights.size());
-            lastReportedCount = validLightCount;
         }
     }
     catch (...) {

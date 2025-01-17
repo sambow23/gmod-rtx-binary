@@ -1,6 +1,8 @@
 include("shared.lua")
 
 local activeLights = {}
+local lastUpdate = 0
+local UPDATE_INTERVAL = 0.016 -- ~60fps
 
 function ENT:Initialize()
     self:SetNoDraw(true)
@@ -65,18 +67,26 @@ function ENT:OnNetworkVarChanged(name, old, new)
     end
 end
 
+hook.Add("PreRender", "RTXLightFrameSync", function()
+    RTXBeginFrame()
+end)
+
+hook.Add("PostRender", "RTXLightFrameSync", function()
+    RTXEndFrame()
+end)
+
 function ENT:Think()
     if not self.nextUpdate then self.nextUpdate = 0 end
     if CurTime() < self.nextUpdate then return end
     
-    -- Only update if we have a valid light
+    -- Only update if we have a valid light and enough time has passed
     if self.rtxLightHandle then
         local pos = self:GetPos()
         
         -- Check if we actually need to update
         if not self.lastUpdatePos or pos:DistToSqr(self.lastUpdatePos) > 1 then
-            local success, newHandle = pcall(function()
-                return UpdateRTXLight(
+            local success = pcall(function()
+                UpdateRTXLight(
                     self.rtxLightHandle,
                     pos.x, pos.y, pos.z,
                     self:GetLightSize() / 10,  -- Scale down size
@@ -87,8 +97,7 @@ function ENT:Think()
                 )
             end)
             
-            if success and newHandle then
-                self.rtxLightHandle = newHandle
+            if success then
                 self.lastUpdatePos = pos
                 self.lastUpdateTime = CurTime()
             else
@@ -101,7 +110,7 @@ function ENT:Think()
         self:CreateRTXLight()
     end
     
-    self.nextUpdate = CurTime() + 0.1  -- Update every 0.1 seconds
+    self.nextUpdate = CurTime() + UPDATE_INTERVAL
 end
 
 function ENT:OnRemove()

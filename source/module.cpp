@@ -20,6 +20,16 @@ remix::Interface* g_remix = nullptr;
 
 using namespace GarrysMod::Lua;
 
+LUA_FUNCTION(RTXBeginFrame) {
+    RTXLightManager::Instance().BeginFrame();
+    return 0;
+}
+
+LUA_FUNCTION(RTXEndFrame) {
+    RTXLightManager::Instance().EndFrame();
+    return 0;
+}
+
 LUA_FUNCTION(CreateRTXLight) {
     try {
         if (!g_remix) {
@@ -217,6 +227,12 @@ GMOD_MODULE_OPEN() {
 
         // Register Lua functions
         LUA->PushSpecial(GarrysMod::Lua::SPECIAL_GLOB); 
+            LUA->PushCFunction(RTXBeginFrame);
+            LUA->SetField(-2, "RTXBeginFrame");
+            
+            LUA->PushCFunction(RTXEndFrame);
+            LUA->SetField(-2, "RTXEndFrame");
+
             LUA->PushCFunction(CreateRTXLight);
             LUA->SetField(-2, "CreateRTXLight");
             
