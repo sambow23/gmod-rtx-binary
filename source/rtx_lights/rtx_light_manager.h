@@ -40,6 +40,8 @@ public:
     void DestroyLight(remixapi_LightHandle handle);
     void DrawLights();
     bool HasLightForEntity(uint64_t entityID) const;
+    void ValidateState();
+    void RegisterLuaEntityValidator(std::function<bool(uint64_t)> validator);
 
     // Frame synchronization
     void BeginFrame();
@@ -67,6 +69,7 @@ private:
     std::vector<ManagedLight> m_lightsToDestroy;
     std::queue<PendingUpdate> m_pendingUpdates;
     std::unordered_map<uint64_t, ManagedLight> m_lightsByEntityID;  // Track lights by entity ID
+    std::function<bool(uint64_t)> m_luaEntityValidator;
     mutable CRITICAL_SECTION m_lightCS;
     mutable CRITICAL_SECTION m_updateCS;
     bool m_initialized;

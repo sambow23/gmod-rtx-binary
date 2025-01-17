@@ -30,6 +30,34 @@ LUA_FUNCTION(RTXEndFrame) {
     return 0;
 }
 
+LUA_FUNCTION(RegisterRTXLightEntityValidator) {
+    if (!LUA->IsType(1, GarrysMod::Lua::Type::FUNCTION)) {
+        LUA->ThrowError("Expected function as argument 1");
+        return 0;
+    }
+
+    // Store the function reference
+    LUA->Push(1); // Push the function
+    int functionRef = LUA->ReferenceCreate();
+
+    // Create the validator function that will call back to Lua
+    auto validator = [=](uint64_t entityID) -> bool {
+        LUA->ReferencePush(functionRef); // Push the stored function
+        LUA->PushNumber(static_cast<double>(entityID)); // Push entity ID
+        LUA->Call(1, 1); // Call with 1 arg, expect 1 return
+
+        bool exists = LUA->GetBool(-1);
+        LUA->Pop(); // Pop the return value
+
+        return exists;
+    };
+
+    // Register the validator with the RTX Light Manager
+    RTXLightManager::Instance().RegisterLuaEntityValidator(validator);
+
+    return 0;
+}
+
 LUA_FUNCTION(CreateRTXLight) {
     try {
         if (!g_remix) {
@@ -263,6 +291,9 @@ GMOD_MODULE_OPEN() {
             
             LUA->PushCFunction(RTXEndFrame);
             LUA->SetField(-2, "RTXEndFrame");
+
+            LUA->PushCFunction(RegisterRTXLightEntityValidator);
+            LUA->SetField(-2, "RegisterRTXLightEntityValidator");
 
             LUA->PushCFunction(CreateRTXLight);
             LUA->SetField(-2, "CreateRTXLight");

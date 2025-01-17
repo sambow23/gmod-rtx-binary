@@ -11,6 +11,11 @@ local function IsValidLightHandle(handle)
         and pcall(function() return handle ~= NULL end)  -- Safe check for nil/NULL
 end
 
+local function ValidateEntityExists(entityID)
+    local ent = Entity(entityID)
+    return IsValid(ent) and ent:GetClass() == "base_rtx_light"
+end
+
 function ENT:Initialize()
     self:SetNoDraw(true)
     self:DrawShadow(false)
@@ -310,4 +315,16 @@ hook.Add("PreCleanupMap", "CleanupRTXLights", function()
         end
     end
     table.Empty(activeLights)
+end)
+
+timer.Simple(0, function()
+    if RegisterRTXLightEntityValidator then
+        RegisterRTXLightEntityValidator(ValidateEntityExists)
+    end
+end)
+
+timer.Create("RTXLightStateValidation", 5, 0, function()
+    if DrawRTXLights then  -- Check if module is loaded
+        DrawRTXLights()  -- This will trigger ValidateState
+    end
 end)
