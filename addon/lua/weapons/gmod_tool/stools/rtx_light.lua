@@ -33,7 +33,7 @@ function TOOL:LeftClick(trace)
     
     -- Get and clamp tool settings
     local brightness = math.Clamp(self:GetClientNumber("brightness", 100), 1, 1000)
-    local size = math.Clamp(self:GetClientNumber("size", 200), 50, 1000)
+    local size = math.Clamp(self:GetClientNumber("size", 200), 1, 1000)
     local r = math.Clamp(self:GetClientNumber("r", 255), 0, 255)
     local g = math.Clamp(self:GetClientNumber("g", 255), 0, 255)
     local b = math.Clamp(self:GetClientNumber("b", 255), 0, 255)
@@ -105,7 +105,7 @@ if CLIENT then
 
     function TOOL.BuildCPanel(panel)
         panel:NumSlider("Brightness", "rtx_light_brightness", 1, 1000, 0)
-        panel:NumSlider("Size", "rtx_light_size", 50, 1000, 0)
+        panel:NumSlider("Size", "rtx_light_size", 1, 1000, 0)
         panel:ColorPicker("Light Color", "rtx_light_r", "rtx_light_g", "rtx_light_b")
     end
 end
