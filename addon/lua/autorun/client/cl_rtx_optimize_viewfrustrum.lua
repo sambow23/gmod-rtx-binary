@@ -1,206 +1,144 @@
 if not CLIENT then return end
 
 -- ConVars
-local cv_disable_culling = CreateClientConVar("fr_disable", "1", true, false, "Disable frustum culling")
-local cv_bounds_size = CreateClientConVar("fr_bounds_size", "2048", true, false, "Size of render bounds when culling is disabled")
-local cv_update_frequency = CreateClientConVar("fr_update_frequency", "0.5", true, false, "How often to update entities")
-local cv_batch_size = CreateClientConVar("fr_batch_size", "50", true, false, "How many entities to process per frame")
+local cv_enabled = CreateClientConVar("fr_enabled", "1", true, false, "Enable large render bounds for all entities")
+local cv_bounds_size = CreateClientConVar("fr_bounds_size", "8000", true, false, "Size of render bounds")
 
--- Cache system
-local Cache = {
-    processQueue = {},
-    isProcessing = false,
-    lastUpdate = 0,
-    boundsSize = cv_bounds_size:GetFloat(),
-    mins = Vector(-cv_bounds_size:GetFloat(), -cv_bounds_size:GetFloat(), -cv_bounds_size:GetFloat()),
-    maxs = Vector(cv_bounds_size:GetFloat(), cv_bounds_size:GetFloat(), cv_bounds_size:GetFloat()),
-    boundUpdateTimes = {},
-    boundUpdateStates = {},
-    nextBoundUpdate = 0,
-    updateInterval = 0.1,
-    distanceThresholds = {
-        {dist = 1000, interval = 0.1},
-        {dist = 2000, interval = 0.25},
-        {dist = 4000, interval = 0.5},
-        {dist = 8000, interval = 1.0},
-        {dist = 16000, interval = 2.0}
-    }
+-- Cache the bounds vectors
+local boundsSize = cv_bounds_size:GetFloat()
+local mins = Vector(-boundsSize, -boundsSize, -boundsSize)
+local maxs = Vector(boundsSize, boundsSize, boundsSize)
+
+-- RTX Light Updater model list
+local RTX_UPDATER_MODELS = {
+    ["models/hunter/plates/plate.mdl"] = true,
+    ["models/hunter/blocks/cube025x025x025.mdl"] = true
 }
 
--- Helper functions
-local function IsGameReady()
-    return LocalPlayer() and IsValid(LocalPlayer())
-end
+-- Cache for static props
+local staticProps = {}
 
-local function ShouldUpdateBounds(ent)
+-- Helper function to identify RTX updaters
+local function IsRTXUpdater(ent)
     if not IsValid(ent) then return false end
-    
-    local curTime = CurTime()
-    
-    -- Global throttle check
-    if curTime < Cache.nextBoundUpdate then return false end
-    
-    -- Check entity's last update time
-    local lastUpdate = Cache.boundUpdateTimes[ent] or 0
-    local playerPos = LocalPlayer():GetPos()
-    local entPos = ent:GetPos()
-    local distance = playerPos:Distance(entPos)
-    
-    -- Determine update interval based on distance
-    local updateInterval = Cache.updateInterval
-    for _, threshold in ipairs(Cache.distanceThresholds) do
-        if distance > threshold.dist then
-            updateInterval = threshold.interval
-        else
-            break
-        end
-    end
-    
-    -- Check if enough time has passed for this entity
-    return curTime - lastUpdate >= updateInterval
-end
-
-local function ShouldHandleEntity(ent)
-    if not IsValid(ent) then return false end
-    
     local class = ent:GetClass()
-    return class == "prop_physics" or class == "hdri_cube_editor"
+    return class == "rtx_lightupdater" or 
+           class == "rtx_lightupdatermanager" or 
+           (ent:GetModel() and RTX_UPDATER_MODELS[ent:GetModel()])
 end
 
--- Entity Bounds Management
+-- Set bounds for a single entity
 local function SetEntityBounds(ent)
-    if not IsValid(ent) or not cv_disable_culling:GetBool() then return end
+    if not IsValid(ent) or not cv_enabled:GetBool() then return end
     
-    -- Only update if necessary
-    if not ShouldUpdateBounds(ent) then return end
-    
-    -- Regular entities
-    local currentState = Cache.boundUpdateStates[ent]
-    local newState = tostring(Cache.mins) .. tostring(Cache.maxs)
-    
-    if currentState ~= newState then
-        ent:SetRenderBounds(Cache.mins, Cache.maxs)
-        Cache.boundUpdateStates[ent] = newState
-    end
-    
-    -- Update the last update time
-    Cache.boundUpdateTimes[ent] = CurTime()
-    Cache.nextBoundUpdate = CurTime() + 0.016 -- Limit to roughly once per frame maximum
-end
-
--- Batch processing
-local function ProcessBatch()
-    if #Cache.processQueue == 0 then
-        Cache.isProcessing = false
-        return
-    end
-    
-    local batchSize = math.min(cv_batch_size:GetInt(), #Cache.processQueue)
-    local processed = 0
-    local startTime = SysTime()
-    
-    while processed < batchSize and (SysTime() - startTime) < 0.002 do
-        local ent = table.remove(Cache.processQueue, 1)
-        if IsValid(ent) then
-            SetEntityBounds(ent)
-            processed = processed + 1
-        end
-    end
-    
-    if #Cache.processQueue > 0 then
-        timer.Simple(0, ProcessBatch)
+    -- Set larger bounds for RTX updaters
+    if IsRTXUpdater(ent) then
+        local rtxBoundsSize = Vector(16384, 16384, 16384)
+        ent:SetRenderBounds(-rtxBoundsSize, rtxBoundsSize)
+        ent:DisableMatrix("RenderMultiply")
+        ent:SetNoDraw(false)
     else
-        Cache.isProcessing = false
+        -- Regular entities get standard large bounds
+        ent:SetRenderBounds(mins, maxs)
     end
 end
 
-local function QueueEntities()
-    if not IsGameReady() then return end
-    
-    table.Empty(Cache.processQueue)
-    
-    for _, ent in ipairs(ents.GetAll()) do
-        if IsValid(ent) and ShouldHandleEntity(ent) then
-            table.insert(Cache.processQueue, ent)
+-- Create clientside static props
+local function CreateStaticProps()
+    -- Clear existing static props
+    for _, prop in pairs(staticProps) do
+        if IsValid(prop) then
+            prop:Remove()
         end
     end
-    
-    if not Cache.isProcessing and #Cache.processQueue > 0 then
-        Cache.isProcessing = true
-        ProcessBatch()
+    staticProps = {}
+
+    -- Create new static props
+    if NikNaks and NikNaks.CurrentMap then
+        local props = NikNaks.CurrentMap:GetStaticProps()
+        for _, propData in pairs(props) do
+            local prop = ClientsideModel(propData:GetModel())
+            if IsValid(prop) then
+                prop:SetPos(propData:GetPos())
+                prop:SetAngles(propData:GetAngles())
+                prop:SetRenderBounds(mins, maxs)
+                prop:SetColor(propData:GetColor())
+                prop:SetModelScale(propData:GetScale())
+                table.insert(staticProps, prop)
+            end
+        end
     end
 end
 
-local function UpdateCacheSettings()
-    Cache.boundsSize = cv_bounds_size:GetFloat()
-    Cache.mins = Vector(-Cache.boundsSize, -Cache.boundsSize, -Cache.boundsSize)
-    Cache.maxs = Vector(Cache.boundsSize, Cache.boundsSize, Cache.boundsSize)
-    
-    -- Clear caches to force updates
-    Cache.boundUpdateTimes = {}
-    Cache.boundUpdateStates = {}
-    Cache.nextBoundUpdate = 0
-    Cache.lastUpdate = 0
-    
-    -- Force a full refresh
-    if IsGameReady() then
-        QueueEntities()
-    end
-end
-
--- Hooks
-hook.Add("Think", "UpdateRenderBounds", function()
-    if not cv_disable_culling:GetBool() then return end
-    if not IsGameReady() then return end
-    
-    local curTime = CurTime()
-    if curTime < Cache.lastUpdate + cv_update_frequency:GetFloat() then return end
-    
-    Cache.lastUpdate = curTime
-    QueueEntities()
-end)
-
-hook.Add("OnEntityCreated", "HandleNewEntity", function(ent)
+-- Hook for new entities
+hook.Add("OnEntityCreated", "SetLargeRenderBounds", function(ent)
     if not IsValid(ent) then return end
     
     timer.Simple(0, function()
-        if IsValid(ent) and ShouldHandleEntity(ent) then
+        if IsValid(ent) then
             SetEntityBounds(ent)
         end
     end)
 end)
 
-hook.Add("EntityRemoved", "CleanupBoundsCache", function(ent)
-    Cache.boundUpdateTimes[ent] = nil
-    Cache.boundUpdateStates[ent] = nil
+-- Initial setup
+hook.Add("InitPostEntity", "InitialBoundsSetup", function()
+    timer.Simple(1, function()
+        -- Set bounds for all existing entities
+        for _, ent in ipairs(ents.GetAll()) do
+            SetEntityBounds(ent)
+        end
+        
+        -- Create static props
+        CreateStaticProps()
+    end)
 end)
 
-cvars.AddChangeCallback("fr_bounds_size", UpdateCacheSettings)
-cvars.AddChangeCallback("fr_disable", UpdateCacheSettings)
-cvars.AddChangeCallback("fr_update_frequency", function(convar, old, new)
-    Cache.lastUpdate = 0 -- Force next update
+-- Map cleanup/reload handler
+hook.Add("OnReloaded", "RefreshStaticProps", function()
+    -- Remove existing static props
+    for _, prop in pairs(staticProps) do
+        if IsValid(prop) then
+            prop:Remove()
+        end
+    end
+    staticProps = {}
+    
+    -- Recreate static props
+    timer.Simple(1, CreateStaticProps)
 end)
-cvars.AddChangeCallback("fr_batch_size", function(convar, old, new)
-    Cache.processQueue = {} -- Reset process queue
-    Cache.isProcessing = false
-    QueueEntities() -- Restart queue processing
+
+-- ConCommand to refresh all entities' bounds
+concommand.Add("fr_refresh", function()
+    if not cv_enabled:GetBool() then return end
+    
+    boundsSize = cv_bounds_size:GetFloat()
+    mins = Vector(-boundsSize, -boundsSize, -boundsSize)
+    maxs = Vector(boundsSize, boundsSize, boundsSize)
+    
+    -- Update regular entities
+    for _, ent in ipairs(ents.GetAll()) do
+        SetEntityBounds(ent)
+    end
+    
+    -- Refresh static props
+    CreateStaticProps()
+    
+    print("Refreshed render bounds for all entities and static props")
 end)
 
 -- Debug command
 concommand.Add("fr_debug", function()
-    print("\nFrustum Optimization Debug:")
-    print("Culling Disabled:", cv_disable_culling:GetBool())
+    print("\nRTX Frustum Optimization Debug:")
+    print("Enabled:", cv_enabled:GetBool())
     print("Bounds Size:", cv_bounds_size:GetFloat())
-    print("Update Frequency:", cv_update_frequency:GetFloat())
-    print("\nCurrent State:")
-    print("Queue Size:", #Cache.processQueue)
-    print("Is Processing:", Cache.isProcessing)
+    print("Static Props Count:", #staticProps)
     
-    local handledCount = 0
+    local rtxCount = 0
     for _, ent in ipairs(ents.GetAll()) do
-        if IsValid(ent) and ShouldHandleEntity(ent) then
-            handledCount = handledCount + 1
+        if IsValid(ent) and IsRTXUpdater(ent) then
+            rtxCount = rtxCount + 1
         end
     end
-    print("Handled Entities:", handledCount)
+    print("RTX Updaters:", rtxCount)
 end)
