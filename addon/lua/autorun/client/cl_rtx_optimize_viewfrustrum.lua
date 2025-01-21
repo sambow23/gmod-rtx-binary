@@ -2,7 +2,7 @@ if not CLIENT then return end
 
 -- ConVars
 local cv_enabled = CreateClientConVar("fr_enabled", "1", true, false, "Enable large render bounds for all entities")
-local cv_bounds_size = CreateClientConVar("fr_bounds_size", "8000", true, false, "Size of render bounds")
+local cv_bounds_size = CreateClientConVar("fr_bounds_size", "4096", true, false, "Size of render bounds")
 local cv_rtx_updater_distance = CreateClientConVar("fr_rtx_distance", "2048", true, false, "Maximum render distance for RTX light updaters")
 
 -- Cache the bounds vectors
