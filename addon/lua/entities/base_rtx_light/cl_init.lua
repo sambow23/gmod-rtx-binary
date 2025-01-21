@@ -7,6 +7,23 @@ local activeRTXLights = {}
 
 ENT.rtxEntityID = nil
 
+local function HSVToRGB(h, s, v)
+    local h_sector = h / 60
+    local h_int = math.floor(h_sector)
+    local f = h_sector - h_int
+    local p = v * (1 - s)
+    local q = v * (1 - s * f)
+    local t = v * (1 - s * (1 - f))
+
+    if h_int == 0 then return v * 255, t * 255, p * 255
+    elseif h_int == 1 then return q * 255, v * 255, p * 255
+    elseif h_int == 2 then return p * 255, v * 255, t * 255
+    elseif h_int == 3 then return p * 255, q * 255, v * 255
+    elseif h_int == 4 then return t * 255, p * 255, v * 255
+    else return v * 255, p * 255, q * 255
+    end
+end
+
 local function IsValidLightHandle(handle)
     return handle ~= nil 
         and type(handle) == "userdata" 
@@ -16,6 +33,28 @@ end
 local function ValidateEntityExists(entityID)
     local ent = Entity(entityID)
     return IsValid(ent) and ent:GetClass() == "base_rtx_light"
+end
+
+function ENT:AnimateColor()
+    if not self.IsAnimating then return end
+    
+    self.AnimationHue = (self.AnimationHue + 1) % 360
+    local r, g, b = HSVToRGB(self.AnimationHue, 1, 1)
+    
+    -- Update networked values
+    net.Start("RTXLight_UpdateProperty")
+        net.WriteEntity(self)
+        net.WriteString("color")
+        net.WriteUInt(r, 8)
+        net.WriteUInt(g, 8)
+        net.WriteUInt(b, 8)
+    net.SendToServer()
+    
+    -- Force immediate local update
+    if IsValid(self) and IsValidLightHandle(self.rtxLightHandle) then
+        self:Think()
+        self.lastUpdatePos = nil
+    end
 end
 
 function ENT:Initialize()
@@ -31,6 +70,8 @@ function ENT:Initialize()
             self:CreateRTXLight()
         end
     end)
+    self.IsAnimating = false
+    self.AnimationHue = 0
 end
 
 function ENT:CreateRTXLight()
@@ -154,6 +195,10 @@ function ENT:OnRemove()
         end)
         self.rtxLightHandle = nil
     end
+    if self.AnimationTimer then
+        timer.Remove("RTXLight_ColorAnim_" .. self:EntIndex())
+        self.AnimationTimer = nil
+    end
 end
 
 -- Add a hook to handle map cleanup
@@ -273,6 +318,60 @@ function ENT:OpenPropertyMenu()
         if IsValid(self) and IsValidLightHandle(self.rtxLightHandle) then
             self:Think()  -- Use the existing Think function's update logic
             self.lastUpdatePos = nil  -- Force an update
+        end
+    end
+
+    local animateButton = scroll:Add("DButton")
+    animateButton:Dock(TOP)
+    animateButton:DockMargin(0, 10, 0, 0)
+    animateButton:SetTall(30)
+    animateButton:SetText(self.IsAnimating and "Stop Color Animation" or "Start Color Animation")
+    
+    local animSpeedSlider = scroll:Add("DNumSlider")
+    animSpeedSlider:Dock(TOP)
+    animSpeedSlider:SetText("Animation Speed")
+    animSpeedSlider:SetMin(25)
+    animSpeedSlider:SetMax(100)
+    animSpeedSlider:SetDecimals(1)
+    animSpeedSlider:SetValue(1)
+    animSpeedSlider:SetEnabled(self.IsAnimating)
+    
+    local function UpdateAnimation()
+        if self.IsAnimating then
+            if not self.AnimationTimer then
+                self.AnimationTimer = timer.Create("RTXLight_ColorAnim_" .. self:EntIndex(), 0.05, 0, function()
+                    if IsValid(self) then
+                        self:AnimateColor()
+                    end
+                end)
+            end
+        else
+            if self.AnimationTimer then
+                timer.Remove("RTXLight_ColorAnim_" .. self:EntIndex())
+                self.AnimationTimer = nil
+            end
+        end
+        
+        animateButton:SetText(self.IsAnimating and "Stop Color Animation" or "Start Color Animation")
+        animSpeedSlider:SetEnabled(self.IsAnimating)
+    end
+    
+    animateButton.DoClick = function()
+        self.IsAnimating = not self.IsAnimating
+        UpdateAnimation()
+    end
+    
+    animSpeedSlider.OnValueChanged = function(_, value)
+        if self.AnimationTimer then
+            timer.Adjust("RTXLight_ColorAnim_" .. self:EntIndex(), 0.1 / value, 0)
+        end
+    end
+    
+    -- Add cleanup for animation when closing the menu
+    frame.OnRemove = function()
+        if self.AnimationTimer then
+            timer.Remove("RTXLight_ColorAnim_" .. self:EntIndex())
+            self.AnimationTimer = nil
         end
     end
     
