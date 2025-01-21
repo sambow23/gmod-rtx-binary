@@ -269,7 +269,7 @@ local function CreateSettingsPanel(panel)
     scrollPanel:DockMargin(0, 0, 0, 0)
     
     -- Enable/Disable Toggle
-    panel:CheckBox("Enable Large Render Bounds", "fr_enabled")
+    panel:CheckBox("Enable RTX View Frustrum", "fr_enabled")
     
     -- Add some spacing
     panel:Help("")
@@ -350,7 +350,7 @@ end
 
 -- Add to Utilities menu
 hook.Add("PopulateToolMenu", "RTXFrustumOptimizationMenu", function()
-    spawnmenu.AddToolMenuOption("Utilities", "RTX", "RTXFrustumSettings", "Frustum Settings", "", "", function(panel)
+    spawnmenu.AddToolMenuOption("Utilities", "User", "RTX_OVF", "#RTX View Frustum", "", "", function(panel)
         CreateSettingsPanel(panel)
     end)
 end)
