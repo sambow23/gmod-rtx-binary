@@ -25,12 +25,17 @@ local RTX_UPDATER_MODELS = {
 local staticProps = {}
 local originalBounds = {} -- Store original render bounds
 
+local SPECIAL_ENTITIES = {
+    ["hdri_cube_editor"] = true,
+    ["rtx_lightupdater"] = true,
+    ["rtx_lightupdatermanager"] = true
+}
+
 -- Helper function to identify RTX updaters
 local function IsRTXUpdater(ent)
     if not IsValid(ent) then return false end
     local class = ent:GetClass()
-    return class == "rtx_lightupdater" or 
-           class == "rtx_lightupdatermanager" or 
+    return SPECIAL_ENTITIES[class] or 
            (ent:GetModel() and RTX_UPDATER_MODELS[ent:GetModel()])
 end
 
@@ -54,6 +59,14 @@ local function AddToRTXCache(ent)
         ent:SetRenderBounds(-rtxBoundsSize, rtxBoundsSize)
         ent:DisableMatrix("RenderMultiply")
         ent:SetNoDraw(false)
+        
+        -- Special handling for hdri_cube_editor to ensure it's never culled
+        if ent:GetClass() == "hdri_cube_editor" then
+            -- Using a very large value for HDRI cube editor
+            local hdriSize = 32768 -- Maximum recommended size
+            local hdriBounds = Vector(hdriSize, hdriSize, hdriSize)
+            ent:SetRenderBounds(-hdriBounds, hdriBounds)
+        end
     end
 end
 
@@ -75,8 +88,15 @@ local function SetEntityBounds(ent, useOriginal)
     else
         StoreOriginalBounds(ent)
         
+        -- Special handling for HDRI cube editor
+        if ent:GetClass() == "hdri_cube_editor" then
+            local hdriSize = 32768 -- Maximum recommended size
+            local hdriBounds = Vector(hdriSize, hdriSize, hdriSize)
+            ent:SetRenderBounds(-hdriBounds, hdriBounds)
+            ent:DisableMatrix("RenderMultiply")
+            ent:SetNoDraw(false)
         -- Use cache to check for RTX updaters
-        if rtxUpdaterCache[ent] then
+        elseif rtxUpdaterCache[ent] then
             local rtxDistance = cv_rtx_updater_distance:GetFloat()
             local rtxBoundsSize = Vector(rtxDistance, rtxDistance, rtxDistance)
             ent:SetRenderBounds(-rtxBoundsSize, rtxBoundsSize)
@@ -87,7 +107,6 @@ local function SetEntityBounds(ent, useOriginal)
         end
     end
 end
-
 
 -- Create clientside static props
 local function CreateStaticProps()
