@@ -354,60 +354,77 @@ uint64_t RTXLightManager::GenerateLightHash() const {
     return (static_cast<uint64_t>(GetCurrentProcessId()) << 32) | (++counter);
 }
 
-bool RTXLightManager::UpdateLight(remixapi_LightHandle handle, 
-    const LightProperties& props, remixapi_LightHandle* newHandle) {
-    
+bool RTXLightManager::UpdateLight(remixapi_LightHandle handle, const LightProperties& props, remixapi_LightHandle* newHandle) {
     if (!m_initialized || !m_remix) return false;
 
-    class LightUpdateTransaction {
-        RTXLightManager& manager;
-        remixapi_LightHandle oldHandle;
-        remixapi_LightHandle newHandle;
-        bool committed;
-    public:
-        LightUpdateTransaction(RTXLightManager& m, remixapi_LightHandle h) 
-            : manager(m), oldHandle(h), newHandle(nullptr), committed(false) {}
-        
-        ~LightUpdateTransaction() {
-            if (!committed && newHandle) {
-                manager.m_remix->DestroyLight(newHandle);
+    // Prevent recursive updates
+    if (m_isUpdating.exchange(true)) {
+        LogMessage("Warning: Recursive UpdateLight call detected\n");
+        return false;
+    }
+
+    EnterCriticalSection(&m_updateCS);
+    
+    try {
+        // Validate handle before updating
+        if (!ValidateLightHandle(handle)) {
+            LogMessage("Attempted to update invalid light handle: %p\n", handle);
+            LeaveCriticalSection(&m_updateCS);
+            m_isUpdating = false;
+            return false;
+        }
+
+        // Store old properties for rollback
+        LightProperties oldProps;
+        bool foundOld = false;
+        for (const auto& light : m_lights) {
+            if (light.handle == handle) {
+                oldProps = light.properties;
+                foundOld = true;
+                break;
             }
         }
 
-        void Commit() { committed = true; }
-    };
-
-    EnterCriticalSection(&m_updateCS);
-    LightUpdateTransaction transaction(*this, handle);
-    
-    try {
-        // Create new light first
+        // Create new light before destroying old one
         auto sphereLight = CreateSphereLight(props);
         auto lightInfo = CreateLightInfo(sphereLight);
         auto result = m_remix->CreateLight(lightInfo);
         
         if (!result) {
+            LogMessage("Failed to create new light during update\n");
             LeaveCriticalSection(&m_updateCS);
+            m_isUpdating = false;
             return false;
         }
 
-        // Only destroy old after new one is created successfully
-        DestroyLight(handle);
-        
-        ManagedLight newLight{};
-        newLight.handle = result.value();
-        newLight.properties = props;
-        newLight.lastUpdateTime = GetTickCount64() / 1000.0f;
-        m_lights.push_back(newLight);
-        
-        if (newHandle) *newHandle = newLight.handle;
-        
-        transaction.Commit();
+        // Only destroy old after successful creation
+        m_remix->DestroyLight(handle);
+
+        // Update tracking
+        bool updated = false;
+        for (auto& light : m_lights) {
+            if (light.handle == handle) {
+                light.handle = result.value();
+                light.properties = props;
+                light.lastUpdateTime = GetTickCount64() / 1000.0f;
+                updated = true;
+                if (newHandle) *newHandle = light.handle;
+                break;
+            }
+        }
+
+        if (!updated) {
+            LogMessage("Warning: Light handle not found in tracking list\n");
+        }
+
         LeaveCriticalSection(&m_updateCS);
+        m_isUpdating = false;
         return true;
     }
     catch (...) {
+        LogMessage("Exception in UpdateLight\n");
         LeaveCriticalSection(&m_updateCS);
+        m_isUpdating = false;
         return false;
     }
 }
@@ -474,32 +491,70 @@ void RTXLightManager::CleanupInvalidLights() {
 
 void RTXLightManager::DrawLights() {
     if (!m_initialized || !m_remix) return;
-
-    // Early exit if no lights exist
     if (m_lights.empty()) return;
+
+    // Prevent recursive drawing
+    if (m_isDrawing.exchange(true)) {
+        LogMessage("Warning: Recursive DrawLights call detected\n");
+        return;
+    }
 
     EnterCriticalSection(&m_lightCS);
     
+    std::vector<remixapi_LightHandle> invalidLights;
+    
     try {
-        // Process any pending updates before drawing
-        if (!m_isFrameActive) {
+        m_frameCount++;
+        
+        // Batch validation
+        for (const auto& light : m_lights) {
+            if (!ValidateLightHandle(light.handle)) {
+                invalidLights.push_back(light.handle);
+                LogMessage("Invalid light detected: %p\n", light.handle);
+            }
+        }
+
+        // Remove invalid lights first
+        if (!invalidLights.empty()) {
+            LogMessage("Cleaning up %zu invalid lights\n", invalidLights.size());
+            for (auto handle : invalidLights) {
+                DestroyLight(handle);
+            }
+        }
+
+        // Only process updates if not currently updating
+        if (!m_isFrameActive && !m_isUpdating) {
             ProcessPendingUpdates();
         }
 
+        // Draw remaining valid lights
         for (const auto& light : m_lights) {
             if (light.handle) {
-                auto result = m_remix->DrawLightInstance(light.handle);
-                if (!static_cast<bool>(result)) {
-                    LogMessage("Failed to draw light handle: %p\n", light.handle);
+                try {
+                    auto result = m_remix->DrawLightInstance(light.handle);
+                    if (!static_cast<bool>(result)) {
+                        LogMessage("Failed to draw light %p\n", light.handle);
+                    }
+                } catch (...) {
+                    LogMessage("Exception drawing light %p\n", light.handle);
                 }
             }
         }
+
+        // Periodic validation (every 60 frames)
+        if ((m_frameCount % 60) == 0) {
+            ValidateState();
+        }
+    }
+    catch (const std::exception& e) {
+        LogMessage("Exception in DrawLights: %s\n", e.what());
     }
     catch (...) {
-        LogMessage("Exception in DrawLights\n");
+        LogMessage("Unknown exception in DrawLights\n");
     }
 
     LeaveCriticalSection(&m_lightCS);
+    m_isDrawing = false;
 }
 
 // Helper functions implementation...

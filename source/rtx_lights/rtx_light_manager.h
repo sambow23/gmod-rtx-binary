@@ -70,10 +70,25 @@ private:
     std::queue<PendingUpdate> m_pendingUpdates;
     std::unordered_map<uint64_t, ManagedLight> m_lightsByEntityID;  // Track lights by entity ID
     std::function<bool(uint64_t)> m_luaEntityValidator;
+    std::atomic<bool> m_isUpdating{false};
+    std::atomic<bool> m_isDrawing{false};
+    std::atomic<uint32_t> m_frameCount{0};
     mutable CRITICAL_SECTION m_lightCS;
     mutable CRITICAL_SECTION m_updateCS;
     bool m_initialized;
     bool m_isFrameActive;
+
+    bool ValidateLightHandle(remixapi_LightHandle handle) const {
+        if (!handle || !m_remix) return false;
+        
+        try {
+            // Try to query light properties as validation
+            auto result = m_remix->DrawLightInstance(handle);
+            return static_cast<bool>(result);
+        } catch (...) {
+            return false;
+        }
+    }
 
     // Delete copy constructor and assignment operator
     RTXLightManager(const RTXLightManager&) = delete;
