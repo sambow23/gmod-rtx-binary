@@ -38,24 +38,6 @@ local vertexBuffer = {
     uvs = {}
 }
 
--- Utility Functions
-
-local function DisableWorldRendering()
-    hook.Add("PreDrawWorld", "RTXHideWorld", function()
-        render.OverrideDepthEnable(true, false)
-        return true -- Prevent original world drawing
-    end)
-    
-    hook.Add("PostDrawWorld", "RTXHideWorld", function()
-        render.OverrideDepthEnable(false)
-    end)
-end
-
-local function EnableWorldRendering()
-    hook.Remove("PreDrawWorld", "RTXHideWorld") 
-    hook.Remove("PostDrawWorld", "RTXHideWorld")
-end
-
 local function ValidateVertex(pos)
     -- Check for NaN or extreme values
     if not pos or 
