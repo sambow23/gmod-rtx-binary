@@ -6,6 +6,7 @@
 #include <vector>
 #include <queue>
 #include <mutex>
+#include <atomic>
 #include <Windows.h>
 
 class RTXLightManager {
@@ -72,11 +73,13 @@ private:
     std::function<bool(uint64_t)> m_luaEntityValidator;
     std::atomic<bool> m_isUpdating{false};
     std::atomic<bool> m_isDrawing{false};
+    std::atomic<bool> m_isValidating{false};
     std::atomic<uint32_t> m_frameCount{0};
     mutable CRITICAL_SECTION m_lightCS;
     mutable CRITICAL_SECTION m_updateCS;
     bool m_initialized;
     bool m_isFrameActive;
+    float m_lastValidationTime;
 
     bool ValidateLightHandle(remixapi_LightHandle handle) const {
         if (!handle || !m_remix) return false;

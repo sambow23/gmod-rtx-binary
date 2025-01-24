@@ -10,7 +10,9 @@ RTXLightManager& RTXLightManager::Instance() {
 RTXLightManager::RTXLightManager() 
     : m_remix(nullptr)
     , m_initialized(false)
-    , m_isFrameActive(false) {
+    , m_isFrameActive(false)
+    , m_isValidating(false)
+    , m_lastValidationTime(0.0f) {
     InitializeCriticalSection(&m_lightCS);
     InitializeCriticalSection(&m_updateCS);
 }
@@ -274,69 +276,85 @@ void RTXLightManager::RegisterLuaEntityValidator(std::function<bool(uint64_t)> v
 void RTXLightManager::ValidateState() {
     if (!m_initialized || !m_remix) return;
 
+    bool expected = false;
+    if (!m_isValidating.compare_exchange_strong(expected, true)) {
+        return;
+    }
+
     EnterCriticalSection(&m_lightCS);
     
     try {
-        // First pass: validate RTX light handles and build a list of invalid ones
-        std::vector<remixapi_LightHandle> invalidHandles;
-        for (const auto& light : m_lights) {
-            if (!light.handle) {
-                LogMessage("Found null light handle\n");
-                invalidHandles.push_back(light.handle);
+        float currentTime = GetTickCount64() / 1000.0f;
+        if (currentTime - m_lastValidationTime < 5.0f) { // Increased delay further
+            LeaveCriticalSection(&m_lightCS);
+            m_isValidating.store(false);
+            return;
+        }
+        m_lastValidationTime = currentTime;
+
+        if (!m_luaEntityValidator) {
+            LeaveCriticalSection(&m_lightCS);
+            m_isValidating.store(false);
+            return;
+        }
+
+        std::vector<uint64_t> entitiesToRemove;
+        std::vector<uint64_t> entitiesToKeep;
+
+        // First pass: identify entities
+        for (const auto& pair : m_lightsByEntityID) {
+            bool isValid = false;
+            try {
+                isValid = m_luaEntityValidator(pair.first);
+                LogMessage("Entity %llu (Index: %llu) validation result: %s\n", 
+                    pair.first, 
+                    pair.first % 1000000,
+                    isValid ? "valid" : "invalid");
+                
+                if (isValid) {
+                    entitiesToKeep.push_back(pair.first);
+                } else {
+                    // Only mark for removal if we haven't seen this entity recently
+                    float timeSinceUpdate = currentTime - pair.second.lastUpdateTime;
+                    if (timeSinceUpdate > 10.0f) { // Only remove if not updated for 10 seconds
+                        entitiesToRemove.push_back(pair.first);
+                    }
+                }
+            }
+            catch (...) {
+                LogMessage("Exception during validation of entity %llu\n", pair.first);
                 continue;
             }
+        }
 
-            // Try to draw the light as a validity check
-            auto result = m_remix->DrawLightInstance(light.handle);
-            if (!static_cast<bool>(result)) {
-                LogMessage("Found invalid light handle: %p\n", light.handle);
-                invalidHandles.push_back(light.handle);
+        // Only remove if we have clearly invalid entities AND some valid ones
+        if (!entitiesToRemove.empty() && !entitiesToKeep.empty()) {
+            for (uint64_t entityID : entitiesToRemove) {
+                auto it = m_lightsByEntityID.find(entityID);
+                if (it != m_lightsByEntityID.end()) {
+                    LogMessage("Removing light for invalid entity %llu (Index: %llu) with handle %p\n", 
+                        entityID, entityID % 1000000, it->second.handle);
+                    
+                    if (it->second.handle) {
+                        m_remix->DestroyLight(it->second.handle);
+                    }
+
+                    auto lightIt = std::find_if(m_lights.begin(), m_lights.end(),
+                        [handle = it->second.handle](const ManagedLight& light) {
+                            return light.handle == handle;
+                        });
+                    
+                    if (lightIt != m_lights.end()) {
+                        m_lights.erase(lightIt);
+                    }
+
+                    m_lightsByEntityID.erase(it);
+                }
             }
         }
 
-        // Second pass: validate entities and their associated lights
-        for (auto it = m_lightsByEntityID.begin(); it != m_lightsByEntityID.end(); ) {
-            bool shouldKeep = false;
-
-            // Check if the entity still exists in Lua
-            if (m_luaEntityValidator) {
-                shouldKeep = m_luaEntityValidator(it->first);
-            }
-
-            // Also check if the light handle is valid
-            if (shouldKeep) {
-                auto handle = it->second.handle;
-                shouldKeep = std::find(invalidHandles.begin(), invalidHandles.end(), handle) == invalidHandles.end();
-            }
-
-            if (!shouldKeep) {
-                LogMessage("Removing light for invalid entity %llu with handle %p\n", 
-                    it->first, it->second.handle);
-                
-                // Clean up the RTX light
-                if (it->second.handle) {
-                    m_remix->DestroyLight(it->second.handle);
-                }
-
-                // Remove from main lights vector
-                auto lightIt = std::find_if(m_lights.begin(), m_lights.end(),
-                    [handle = it->second.handle](const ManagedLight& light) {
-                        return light.handle == handle;
-                    });
-                
-                if (lightIt != m_lights.end()) {
-                    m_lights.erase(lightIt);
-                }
-
-                // Remove from entity tracking
-                it = m_lightsByEntityID.erase(it);
-            } else {
-                ++it;
-            }
-        }
-
-        LogMessage("State validation complete. Remaining lights: %d, Tracked entities: %d\n", 
-            m_lights.size(), m_lightsByEntityID.size());
+        LogMessage("State validation complete. Valid: %zu, Invalid: %zu, Total remaining: %d\n", 
+            entitiesToKeep.size(), entitiesToRemove.size(), m_lights.size());
     }
     catch (const std::exception& e) {
         LogMessage("Exception in ValidateState: %s\n", e.what());
@@ -345,6 +363,7 @@ void RTXLightManager::ValidateState() {
         LogMessage("Unknown exception in ValidateState\n");
     }
 
+    m_isValidating.store(false);
     LeaveCriticalSection(&m_lightCS);
 }
 
