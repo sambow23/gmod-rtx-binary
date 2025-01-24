@@ -7,7 +7,8 @@ require("niknaks")
 local CONVARS = {
     ENABLED = CreateClientConVar("rtx_force_render", "1", true, false, "Forces custom mesh rendering of map"),
     DEBUG = CreateClientConVar("rtx_force_render_debug", "0", true, false, "Shows debug info for mesh rendering"),
-    CHUNK_SIZE = CreateClientConVar("rtx_chunk_size", "8196", true, false, "Size of chunks for mesh combining")
+    CHUNK_SIZE = CreateClientConVar("rtx_chunk_size", "65536", true, false, "Size of chunks for mesh combining"),
+    CAPTURE_MODE = CreateClientConVar("rtx_capture_mode", "0", true, false, "Toggles r_drawworld for capture mode")
 }
 
 -- Local Variables and Caches
@@ -436,6 +437,11 @@ cvars.AddChangeCallback("rtx_force_render", function(_, _, new)
     end
 end)
 
+cvars.AddChangeCallback("rtx_capture_mode", function(_, _, new)
+    -- Invert the value: if capture_mode is 1, r_drawworld should be 0 and vice versa
+    RunConsoleCommand("r_drawworld", new == "1" and "0" or "1")
+end)
+
 -- Menu
 hook.Add("PopulateToolMenu", "RTXCustomWorldMenu", function()
     spawnmenu.AddToolMenuOption("Utilities", "User", "RTX_ForceRender", "#RTX Custom World", "", "", function(panel)
@@ -443,13 +449,11 @@ hook.Add("PopulateToolMenu", "RTXCustomWorldMenu", function()
         
         panel:CheckBox("Enable Custom World Rendering", "rtx_force_render")
         panel:ControlHelp("Renders the world using chunked meshes")
-        
-        panel:NumSlider("Chunk Size", "rtx_chunk_size", 4, 65536, 0)
-        panel:ControlHelp("Size of chunks for mesh combining. Larger = better performance but more memory")
+
+        panel:CheckBox("Capture Mode", "rtx_capture_mode")
+        panel:ControlHelp("Enable this if you're taking a capture with RTX Remix")
         
         panel:CheckBox("Show Debug Info", "rtx_force_render_debug")
-        
-        panel:Button("Rebuild Meshes", "rtx_rebuild_meshes")
     end)
 end)
 
