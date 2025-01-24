@@ -450,7 +450,7 @@ hook.Add("PopulateToolMenu", "RTXCustomWorldMenu", function()
         panel:CheckBox("Enable Custom World Rendering", "rtx_force_render")
         panel:ControlHelp("Renders the world using chunked meshes")
 
-        panel:CheckBox("Capture Mode", "rtx_capture_mode")
+        panel:CheckBox("Remix Capture Mode", "rtx_capture_mode")
         panel:ControlHelp("Enable this if you're taking a capture with RTX Remix")
         
         panel:CheckBox("Show Debug Info", "rtx_force_render_debug")
