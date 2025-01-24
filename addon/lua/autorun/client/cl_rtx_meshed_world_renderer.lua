@@ -10,10 +10,11 @@ local CONVARS = {
     CHUNK_SIZE = CreateClientConVar("rtx_chunk_size", "8196", true, false, "Size of chunks for mesh combining")
 }
 
-local MAX_MESH_VERTICES = 10000 -- Source engine mesh vertex limit
-
 -- Local Variables and Caches
-local mapMeshes = {}
+local mapMeshes = {
+    opaque = {},
+    translucent = {},
+}
 local isEnabled = false
 local renderStats = {draws = 0}
 local materialCache = {}
@@ -28,6 +29,13 @@ local angle_zero = Angle(0,0,0)
 local vector_origin = Vector(0,0,0)
 local MAX_VERTICES = 10000
 local EyePos = EyePos
+
+-- Pre-allocate common vectors and tables for reuse
+local vertexBuffer = {
+    positions = {},
+    normals = {},
+    uvs = {}
+}
 
 -- Utility Functions
 
@@ -83,36 +91,26 @@ local function GetChunkKey(x, y, z)
     return x .. "," .. y .. "," .. z
 end
 
-local function GetDisplacementBounds(face)
-    if face._bounds then return face._bounds.mins, face._bounds.maxs end
-    
-    local verts = face:GenerateVertexTriangleData()
-    if not verts or #verts == 0 then return vector_origin, vector_origin end
-    
-    local mins = Vector(math_huge, math_huge, math_huge)
-    local maxs = Vector(-math_huge, -math_huge, -math_huge)
-    
-    for _, vert in ipairs(verts) do
-        local pos = vert.pos
-        mins.x = math_min(mins.x, pos.x)
-        mins.y = math_min(mins.y, pos.y)
-        mins.z = math_min(mins.z, pos.z)
-        maxs.x = math_max(maxs.x, pos.x)
-        maxs.y = math_max(maxs.y, pos.y)
-        maxs.z = math_max(maxs.z, pos.z)
-    end
-    
-    -- Cache the bounds
-    face._bounds = {mins = mins, maxs = maxs}
-    return mins, maxs
-end
-
 -- Main Mesh Building Function
 local function BuildMapMeshes()
+    -- Clean up existing meshes first
+    for renderType, chunks in pairs(mapMeshes) do
+        for chunkKey, materials in pairs(chunks) do
+            for matName, group in pairs(materials) do
+                if group.meshes then
+                    for _, mesh in ipairs(group.meshes) do
+                        if mesh and mesh.Destroy then
+                            mesh:Destroy()
+                        end
+                    end
+                end
+            end
+        end
+    end
+
     mapMeshes = {
         opaque = {},
         translucent = {},
-        displacements = {} -- New category for displacements
     }
     materialCache = {}
     
@@ -120,47 +118,47 @@ local function BuildMapMeshes()
 
     print("[RTX Fixes] Building chunked meshes...")
     local startTime = SysTime()
-    local totalVertCount = 0
     
     local chunkSize = CONVARS.CHUNK_SIZE:GetInt()
     local chunks = {
         opaque = {},
         translucent = {},
-        displacements = {} -- New category for displacements
     }
     
-    -- Sort faces into chunks
+    -- Sort faces into chunks with optimized table operations
     for _, leaf in pairs(NikNaks.CurrentMap:GetLeafs()) do  
         if not leaf or leaf:IsOutsideMap() then continue end
         
         local leafFaces = leaf:GetFaces(true)
         if not leafFaces then continue end
     
+-- In the BuildMapMeshes function, modify the face sorting section:
         for _, face in pairs(leafFaces) do
-            -- Add brush entity check early in the conditions
+            -- Add displacement check early to skip them entirely
             if not face or 
-               IsBrushEntity(face) or -- Move this check earlier
-               not face:ShouldRender() or 
-               IsSkyboxFace(face) then 
+            face:IsDisplacement() or -- Skip displacements early
+            IsBrushEntity(face) or
+            not face:ShouldRender() or 
+            IsSkyboxFace(face) then 
                 continue 
             end
             
-            -- Skip processing if no vertices
             local vertices = face:GetVertexs()
             if not vertices or #vertices == 0 then continue end
             
-            -- Calculate face center
+            -- Optimized center calculation
             local center = Vector(0, 0, 0)
-            for _, vert in ipairs(vertices) do
+            local vertCount = #vertices
+            for i = 1, vertCount do
+                local vert = vertices[i]
                 if not vert then continue end
-                center = center + vert
+                center:Add(vert)
             end
-            center = center / #vertices
+            center:Div(vertCount)
             
-            -- Get chunk coordinates
-            local chunkX = math.floor(center.x / chunkSize)
-            local chunkY = math.floor(center.y / chunkSize)
-            local chunkZ = math.floor(center.z / chunkSize)
+            local chunkX = math_floor(center.x / chunkSize)
+            local chunkY = math_floor(center.y / chunkSize)
+            local chunkZ = math_floor(center.z / chunkSize)
             local chunkKey = GetChunkKey(chunkX, chunkY, chunkZ)
             
             local material = face:GetMaterial()
@@ -169,12 +167,10 @@ local function BuildMapMeshes()
             local matName = material:GetName()
             if not matName then continue end
             
-            -- Cache material
             if not materialCache[matName] then
                 materialCache[matName] = material
             end
             
-            -- Determine which chunk group to use
             local chunkGroup
             if face:IsDisplacement() then
                 chunkGroup = chunks.displacements
@@ -189,7 +185,7 @@ local function BuildMapMeshes()
                 isDisplacement = face:IsDisplacement()
             }
             
-            table.insert(chunkGroup[chunkKey][matName].faces, face)
+            table_insert(chunkGroup[chunkKey][matName].faces, face)
         end
     end
     
@@ -197,159 +193,54 @@ local function BuildMapMeshes()
     local function CreateRegularMeshGroup(faces, material)
         if not faces or #faces == 0 or not material then return nil end
         
-        local meshGroups = {}
-        local allVertices = {}
-        local totalVertices = 0
+        -- Pre-allocate vertex buffer
+        local vertexCount = 0
+        table.Empty(vertexBuffer.positions)
+        table.Empty(vertexBuffer.normals)
+        table.Empty(vertexBuffer.uvs)
         
-        -- Collect vertex data
+        -- Collect vertices more efficiently
         for _, face in ipairs(faces) do
             local verts = face:GenerateVertexTriangleData()
             if verts then
                 for _, vert in ipairs(verts) do
                     if vert.pos and vert.normal then
-                        totalVertices = totalVertices + 1
-                        table.insert(allVertices, vert)
+                        vertexCount = vertexCount + 1
+                        vertexBuffer.positions[vertexCount] = vert.pos
+                        vertexBuffer.normals[vertexCount] = vert.normal
+                        vertexBuffer.uvs[vertexCount] = {vert.u or 0, vert.v or 0}
                     end
                 end
             end
         end
         
-        if CONVARS.DEBUG:GetBool() then
-            print(string.format("[RTX Fixes] Processing chunk with %d total vertices", totalVertices))
-        end
-        
-        -- Create mesh batches
+        -- Create mesh batches using pre-allocated data
+        local meshGroups = {}
         local vertexIndex = 1
-        while vertexIndex <= #allVertices do
-            local remainingVerts = #allVertices - vertexIndex + 1
-            local vertsThisMesh = math.min(MAX_MESH_VERTICES, remainingVerts)
-            
+        
+        while vertexIndex <= vertexCount do
+            local vertsThisMesh = math_min(MAX_VERTICES, vertexCount - vertexIndex + 1)
             if vertsThisMesh > 0 then
-                if CONVARS.DEBUG:GetBool() then
-                    print(string.format("[RTX Fixes] Creating mesh with %d vertices", vertsThisMesh))
-                end
-                
                 local newMesh = Mesh(material)
                 mesh.Begin(newMesh, MATERIAL_TRIANGLES, vertsThisMesh)
                 
                 for i = 0, vertsThisMesh - 1 do
-                    local vert = allVertices[vertexIndex + i]
-                    mesh.Position(vert.pos)
-                    mesh.Normal(vert.normal)
-                    mesh.TexCoord(0, vert.u or 0, vert.v or 0)
+                    local idx = vertexIndex + i
+                    mesh.Position(vertexBuffer.positions[idx])
+                    mesh.Normal(vertexBuffer.normals[idx])
+                    mesh.TexCoord(0, vertexBuffer.uvs[idx][1], vertexBuffer.uvs[idx][2])
                     mesh.AdvanceVertex()
                 end
                 
                 mesh.End()
-                table.insert(meshGroups, newMesh)
+                table_insert(meshGroups, newMesh)
             end
-            
             vertexIndex = vertexIndex + vertsThisMesh
         end
         
         return meshGroups
     end
 
-    local function CreateDisplacementMeshGroup(faces, material)
-        if not faces or #faces == 0 or not material then return nil end
-        
-        -- Preallocate tables
-        local meshGroups = {}
-        local currentVertices = {} -- Changed from table.Create()
-        local currentSize = 0      -- Track size manually
-        
-        -- Sort faces by distance (only when needed)
-        local camPos = EyePos()
-        local sortedFaces = faces
-        if #faces > 1 then
-            sortedFaces = table.Copy(faces)
-            table.sort(sortedFaces, function(a, b)
-                local aMin, aMax = GetDisplacementBounds(a)
-                local bMin, bMax = GetDisplacementBounds(b)
-                local aDist = ((aMin + aMax) * 0.5):DistToSqr(camPos)
-                local bDist = ((bMin + bMax) * 0.5):DistToSqr(camPos)
-                return aDist > bDist
-            end)
-        end
-        
-        -- Process faces with optimized batching
-        local function FlushCurrentBatch()
-            if currentSize > 0 then
-                local newMesh = Mesh(material)
-                mesh.Begin(newMesh, MATERIAL_TRIANGLES, currentSize)
-                
-                for i = 1, currentSize do
-                    local vert = currentVertices[i]
-                    mesh.Position(vert.pos)
-                    mesh.Normal(vert.normal)
-                    mesh.TexCoord(0, vert.u, vert.v)
-                    mesh.AdvanceVertex()
-                end
-                
-                mesh.End()
-                table_insert(meshGroups, newMesh)
-                
-                -- Clear batch
-                currentVertices = {}
-                currentSize = 0
-            end
-        end
-        
-        -- Process vertices with minimal table operations
-        for _, face in ipairs(sortedFaces) do
-            local verts = face:GenerateVertexTriangleData()
-            if not verts then continue end
-            
-            if currentSize + #verts > MAX_VERTICES then
-                FlushCurrentBatch()
-            end
-            
-            local bmodel = face.__bmodel
-            if bmodel > 0 then
-                local func_brush = face.__map:GetEntities()[bmodel]
-                if func_brush then
-                    local origin = func_brush.origin
-                    local angles = func_brush.angles
-                    
-                    for _, vert in ipairs(verts) do
-                        if vert.pos and vert.normal then
-                            currentSize = currentSize + 1
-                            local finalPos = Vector(vert.pos)
-                            local finalNormal = Vector(vert.normal)
-                            
-                            if origin then
-                                finalPos:Add(origin)
-                            end
-                            if angles then
-                                finalPos = LocalToWorld(finalPos, angle_zero, vector_origin, angles)
-                                finalNormal = angles:Forward() * finalNormal.x + 
-                                            angles:Right() * finalNormal.y + 
-                                            angles:Up() * finalNormal.z
-                            end
-                            
-                            currentVertices[currentSize] = {
-                                pos = finalPos,
-                                normal = finalNormal,
-                                u = vert.u,
-                                v = vert.v
-                            }
-                        end
-                    end
-                end
-            else
-                for _, vert in ipairs(verts) do
-                    if vert.pos and vert.normal then
-                        currentSize = currentSize + 1
-                        currentVertices[currentSize] = vert
-                    end
-                end
-            end
-        end
-        
-        FlushCurrentBatch()
-        return meshGroups
-    end
-    
     -- Create combined meshes with separate handling
     for renderType, chunkGroup in pairs(chunks) do
         for chunkKey, materials in pairs(chunkGroup) do
@@ -406,26 +297,7 @@ local function RenderCustomWorld(translucent)
         end
     end
     
-    -- Displacements
-    if not translucent then
-        render.OverrideDepthEnable(true, true)
-        
-        for _, chunkMaterials in pairs(mapMeshes.displacements) do
-            for _, group in pairs(chunkMaterials) do
-                if currentMaterial ~= group.material then
-                    render.SetMaterial(group.material)
-                    currentMaterial = group.material
-                end
-                local meshes = group.meshes
-                for i = 1, #meshes do
-                    meshes[i]:Draw()
-                    draws = draws + 1
-                end
-            end
-        end
-        
-        render.OverrideDepthEnable(false)
-    elseif translucent then
+    if translucent then
         render.OverrideDepthEnable(false)
     end
     
@@ -468,11 +340,20 @@ end
 
 -- Initialization and Cleanup
 local function Initialize()
-    BuildMapMeshes()
+    local success, err = pcall(BuildMapMeshes)
+    if not success then
+        ErrorNoHalt("[RTX Fixes] Failed to build meshes: " .. tostring(err) .. "\n")
+        DisableCustomRendering()
+        return
+    end
     
     timer.Simple(1, function()
         if CONVARS.ENABLED:GetBool() then
-            EnableCustomRendering()
+            local success, err = pcall(EnableCustomRendering)
+            if not success then
+                ErrorNoHalt("[RTX Fixes] Failed to enable custom rendering: " .. tostring(err) .. "\n")
+                DisableCustomRendering()
+            end
         end
     end)
 end
