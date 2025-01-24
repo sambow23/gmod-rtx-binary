@@ -14,6 +14,11 @@ local boundsUpdateTimer = "FR_BoundsUpdate"
 local rtxUpdateTimer = "FR_RTXUpdate"
 local rtxUpdaterCache = {}
 local rtxUpdaterCount = 0
+local BATCH_SIZE = CreateClientConVar("fr_batch_size", "100", true, false, "How many entities to process per frame")
+local processingQueue = {}
+local isProcessing = false
+local progressNotification = nil
+local totalEntitiesToProcess = 0
 
 -- RTX Light Updater model list
 local RTX_UPDATER_MODELS = {
@@ -136,10 +141,35 @@ end
 
 -- Update all entities
 local function UpdateAllEntities(useOriginal)
-    for _, ent in ipairs(ents.GetAll()) do
-        SetEntityBounds(ent, useOriginal)
+    -- Clear any existing processing
+    processingQueue = {}
+    isProcessing = false
+    
+    -- Gather valid entities and process them
+    local entities = ents.GetAll()
+    for _, ent in ipairs(entities) do
+        if IsValid(ent) then
+            SetEntityBounds(ent, useOriginal)
+        end
     end
+    
+    -- Signal completion
+    hook.Run("FR_FinishedProcessing")
 end
+
+-- Status reporting
+local lastProcessStatus = 0
+hook.Add("HUDPaint", "FR_ProcessingStatus", function()
+    if not isProcessing then return end
+    
+    -- Update status once per second
+    if CurTime() - lastProcessStatus > 1 then
+        lastProcessStatus = CurTime()
+        
+        local progress = math.Round((1 - (#processingQueue / #ents.GetAll())) * 100)
+        notification.AddProgress("FR_Processing", "Updating Render Bounds: " .. progress .. "%", progress / 100)
+    end
+end)
 
 -- Hook for new entities
 hook.Add("OnEntityCreated", "SetLargeRenderBounds", function(ent)
@@ -187,7 +217,11 @@ cvars.AddChangeCallback("fr_enabled", function(_, _, new)
     
     if enabled then
         UpdateAllEntities(false)
-        CreateStaticProps()
+        -- Delay static prop creation until entity processing is done
+        hook.Add("FR_FinishedProcessing", "FR_CreateStaticProps", function()
+            CreateStaticProps()
+            hook.Remove("FR_FinishedProcessing", "FR_CreateStaticProps")
+        end)
     else
         UpdateAllEntities(true)
         -- Remove static props
@@ -267,12 +301,21 @@ hook.Add("EntityRemoved", "CleanupRTXCache", function(ent)
     originalBounds[ent] = nil
 end)
 
+local debugInfo = {
+    totalProcessed = 0,
+    lastBatchTime = 0,
+    averageBatchTime = 0
+}
+
 -- Debug command
 concommand.Add("fr_debug", function()
     print("\nRTX Frustum Optimization Debug:")
     print("Enabled:", cv_enabled:GetBool())
-    print("Bounds Size:", cv_bounds_size:GetFloat())
-    print("RTX Updater Distance:", cv_rtx_updater_distance:GetFloat())
+    print("Batch Size:", BATCH_SIZE:GetInt())
+    print("Currently Processing:", isProcessing)
+    print("Queued Entities:", #processingQueue)
+    print("Total Processed:", debugInfo.totalProcessed)
+    print("Average Batch Time:", string.format("%.3f ms", debugInfo.averageBatchTime * 1000))
     print("Static Props Count:", #staticProps)
     print("Stored Original Bounds:", table.Count(originalBounds))
     print("RTX Updaters (Cached):", rtxUpdaterCount)
