@@ -25,12 +25,8 @@ local math_max = math.max
 local math_huge = math.huge
 local math_floor = math.floor
 local table_insert = table.insert
-local LocalToWorld = LocalToWorld
-local angle_zero = Angle(0,0,0)
-local vector_origin = Vector(0,0,0)
-local MAX_VERTICES = 6000
+local MAX_VERTICES = 10000
 local MAX_CHUNK_VERTS = 32768
-local EyePos = EyePos
 
 -- Pre-allocate common vectors and tables for reuse
 local vertexBuffer = {

@@ -140,12 +140,6 @@ private:
     static ParticleRender_t g_original_ParticleRender;
     static void __fastcall ParticleRender_detour(void* thisptr);
 
-    // Skybox
-    Detouring::Hook m_R_DrawSkyBox_hook;
-    static void __fastcall R_DrawSkyBox_detour(void* thisptr, void* edx);
-    typedef void(__fastcall* R_DrawSkyBox_t)(void* thisptr);
-    static R_DrawSkyBox_t g_original_R_DrawSkyBox;
-
     // Add VEH handle storage
     PVOID m_vehHandle;
     PVOID m_vehHandlerDivision;

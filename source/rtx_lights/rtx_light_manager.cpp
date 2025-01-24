@@ -163,9 +163,7 @@ void RTXLightManager::ProcessPendingUpdates() {
             }
         }
     }
-    catch (const std::exception& e) {
-        LogMessage("Exception in ProcessPendingUpdates: %s\n", e.what());
-    }
+
     catch (...) {
         LogMessage("Unknown exception in ProcessPendingUpdates\n");
     }
@@ -356,64 +354,62 @@ uint64_t RTXLightManager::GenerateLightHash() const {
     return (static_cast<uint64_t>(GetCurrentProcessId()) << 32) | (++counter);
 }
 
-bool RTXLightManager::UpdateLight(remixapi_LightHandle handle, const LightProperties& props, remixapi_LightHandle* newHandle) {
+bool RTXLightManager::UpdateLight(remixapi_LightHandle handle, 
+    const LightProperties& props, remixapi_LightHandle* newHandle) {
+    
     if (!m_initialized || !m_remix) return false;
 
-    EnterCriticalSection(&m_updateCS);
-    
-    try {
-        // Verify the light exists before queuing update
-        bool lightExists = false;
-        for (const auto& light : m_lights) {
-            if (light.handle == handle) {
-                lightExists = true;
-                break;
+    class LightUpdateTransaction {
+        RTXLightManager& manager;
+        remixapi_LightHandle oldHandle;
+        remixapi_LightHandle newHandle;
+        bool committed;
+    public:
+        LightUpdateTransaction(RTXLightManager& m, remixapi_LightHandle h) 
+            : manager(m), oldHandle(h), newHandle(nullptr), committed(false) {}
+        
+        ~LightUpdateTransaction() {
+            if (!committed && newHandle) {
+                manager.m_remix->DestroyLight(newHandle);
             }
         }
 
-        if (!lightExists) {
-            LogMessage("Warning: Attempting to update non-existent light %p\n", handle);
+        void Commit() { committed = true; }
+    };
+
+    EnterCriticalSection(&m_updateCS);
+    LightUpdateTransaction transaction(*this, handle);
+    
+    try {
+        // Create new light first
+        auto sphereLight = CreateSphereLight(props);
+        auto lightInfo = CreateLightInfo(sphereLight);
+        auto result = m_remix->CreateLight(lightInfo);
+        
+        if (!result) {
             LeaveCriticalSection(&m_updateCS);
             return false;
         }
 
-        // Queue the update
-        PendingUpdate update;
-        update.handle = handle;
-        update.properties = props;
-        update.needsUpdate = true;
-        update.requiresRecreation = true;
-
-        LogMessage("Queueing update for light %p at position (%f, %f, %f)\n", 
-            handle, props.x, props.y, props.z);
-
-        m_pendingUpdates.push(update);
-
-        // Process immediately if not in active frame
-        if (!m_isFrameActive) {
-            ProcessPendingUpdates();
-            
-            // Find the new handle if requested
-            if (newHandle) {
-                for (const auto& light : m_lights) {
-                    if (light.properties.x == props.x && 
-                        light.properties.y == props.y && 
-                        light.properties.z == props.z) {
-                        *newHandle = light.handle;
-                        break;
-                    }
-                }
-            }
-        }
+        // Only destroy old after new one is created successfully
+        DestroyLight(handle);
+        
+        ManagedLight newLight{};
+        newLight.handle = result.value();
+        newLight.properties = props;
+        newLight.lastUpdateTime = GetTickCount64() / 1000.0f;
+        m_lights.push_back(newLight);
+        
+        if (newHandle) *newHandle = newLight.handle;
+        
+        transaction.Commit();
+        LeaveCriticalSection(&m_updateCS);
+        return true;
     }
     catch (...) {
-        LogMessage("Exception in UpdateLight\n");
         LeaveCriticalSection(&m_updateCS);
         return false;
     }
-
-    LeaveCriticalSection(&m_updateCS);
-    return true;
 }
 
 void RTXLightManager::DestroyLight(remixapi_LightHandle handle) {
@@ -478,6 +474,9 @@ void RTXLightManager::CleanupInvalidLights() {
 
 void RTXLightManager::DrawLights() {
     if (!m_initialized || !m_remix) return;
+
+    // Early exit if no lights exist
+    if (m_lights.empty()) return;
 
     EnterCriticalSection(&m_lightCS);
     
