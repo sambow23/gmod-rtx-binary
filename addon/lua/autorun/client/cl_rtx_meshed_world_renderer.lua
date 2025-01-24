@@ -27,7 +27,8 @@ local table_insert = table.insert
 local LocalToWorld = LocalToWorld
 local angle_zero = Angle(0,0,0)
 local vector_origin = Vector(0,0,0)
-local MAX_VERTICES = 10000
+local MAX_VERTICES = 6000
+local MAX_CHUNK_VERTS = 32768
 local EyePos = EyePos
 
 -- Pre-allocate common vectors and tables for reuse
@@ -53,6 +54,19 @@ end
 local function EnableWorldRendering()
     hook.Remove("PreDrawWorld", "RTXHideWorld") 
     hook.Remove("PostDrawWorld", "RTXHideWorld")
+end
+
+local function ValidateVertex(pos)
+    -- Check for NaN or extreme values
+    if not pos or 
+       not pos.x or not pos.y or not pos.z or
+       pos.x ~= pos.x or pos.y ~= pos.y or pos.z ~= pos.z or -- NaN check
+       math.abs(pos.x) > 16384 or 
+       math.abs(pos.y) > 16384 or 
+       math.abs(pos.z) > 16384 then
+        return false
+    end
+    return true
 end
 
 local function IsBrushEntity(face)
@@ -199,18 +213,58 @@ local function BuildMapMeshes()
         table.Empty(vertexBuffer.normals)
         table.Empty(vertexBuffer.uvs)
         
-        -- Collect vertices more efficiently
+        -- Track chunk bounds
+        local minBounds = Vector(math_huge, math_huge, math_huge)
+        local maxBounds = Vector(-math_huge, -math_huge, -math_huge)
+        
+        -- First pass: collect and validate vertices
+        local validFaces = {}
         for _, face in ipairs(faces) do
             local verts = face:GenerateVertexTriangleData()
             if verts then
+                local faceValid = true
+                local faceVerts = {}
+                
                 for _, vert in ipairs(verts) do
-                    if vert.pos and vert.normal then
-                        vertexCount = vertexCount + 1
-                        vertexBuffer.positions[vertexCount] = vert.pos
-                        vertexBuffer.normals[vertexCount] = vert.normal
-                        vertexBuffer.uvs[vertexCount] = {vert.u or 0, vert.v or 0}
+                    if not ValidateVertex(vert.pos) then
+                        faceValid = false
+                        break
                     end
+                    
+                    -- Update bounds
+                    minBounds.x = math_min(minBounds.x, vert.pos.x)
+                    minBounds.y = math_min(minBounds.y, vert.pos.y)
+                    minBounds.z = math_min(minBounds.z, vert.pos.z)
+                    maxBounds.x = math_max(maxBounds.x, vert.pos.x)
+                    maxBounds.y = math_max(maxBounds.y, vert.pos.y)
+                    maxBounds.z = math_max(maxBounds.z, vert.pos.z)
+                    
+                    table_insert(faceVerts, vert)
                 end
+                
+                if faceValid then
+                    table_insert(validFaces, faceVerts)
+                end
+            end
+        end
+        
+        -- Check chunk size
+        local chunkSize = maxBounds - minBounds
+        if chunkSize.x > MAX_CHUNK_VERTS or 
+           chunkSize.y > MAX_CHUNK_VERTS or 
+           chunkSize.z > MAX_CHUNK_VERTS then
+            return nil -- Skip oversized chunks
+        end
+        
+        -- Second pass: build vertex buffer from valid faces
+        for _, faceVerts in ipairs(validFaces) do
+            for _, vert in ipairs(faceVerts) do
+                if vertexCount >= MAX_VERTICES then break end
+                
+                vertexCount = vertexCount + 1
+                vertexBuffer.positions[vertexCount] = vert.pos
+                vertexBuffer.normals[vertexCount] = vert.normal
+                vertexBuffer.uvs[vertexCount] = {vert.u or 0, vert.v or 0}
             end
         end
         
