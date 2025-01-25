@@ -21,6 +21,9 @@ ShaderAPIHooks::DivisionFunction_t ShaderAPIHooks::g_original_DivisionFunction =
 ShaderAPIHooks::VertexBufferLock_t ShaderAPIHooks::g_original_VertexBufferLock = nullptr;
 std::unordered_set<uintptr_t> ShaderAPIHooks::s_problematicAddresses;
 ShaderAPIHooks::ParticleRender_t ShaderAPIHooks::g_original_ParticleRender = nullptr;
+ShaderAPIHooks::InitParamsEyes_t ShaderAPIHooks::g_original_InitParamsEyes = nullptr;
+ShaderAPIHooks::InitEyes_t ShaderAPIHooks::g_original_InitEyes = nullptr;
+ShaderAPIHooks::DrawEyes_t ShaderAPIHooks::g_original_DrawEyes = nullptr;
 
 namespace {
     bool IsValidPointer(const void* ptr, size_t size) {
@@ -113,6 +116,53 @@ void ShaderAPIHooks::Initialize() {
         if (!shaderapidx9) {
             Error("[Shader Fixes] Failed to get shaderapidx9.dll module\n");
             return;
+        }
+
+        // Get shaderapidx9.dll module
+        auto shaderapidx = GetModuleHandle("shaderapidx9.dll");
+        if (!shaderapidx) {
+            Error("[Shader Fixes] Failed to get shaderapidx9.dll module\n");
+            return;
+        }
+
+        // Eye shader signatures
+        static const char init_params_sig[] = "CF A1 10 00 E9 52 77 0A 00";
+        static const char init_eyes_sig[] = "9E 2D 04 00 E9 69 82 09 00";
+        static const char draw_eyes_sig[] = "E0 2C 05 00 E9 1B B9 04 00";
+
+        // Find and hook eye shader functions
+        auto InitParamsEyes = ScanSign(shaderapidx, init_params_sig, sizeof(init_params_sig) - 1);
+        auto InitEyes = ScanSign(shaderapidx, init_eyes_sig, sizeof(init_eyes_sig) - 1);
+        auto DrawEyes = ScanSign(shaderapidx, draw_eyes_sig, sizeof(draw_eyes_sig) - 1);
+
+        if (InitParamsEyes) {
+            Msg("[Shader Fixes] Found InitParamsEyes at %p\n", InitParamsEyes);
+            Detouring::Hook::Target target(InitParamsEyes);
+            m_InitParamsEyes_hook.Create(target, InitParamsEyes_detour);
+            g_original_InitParamsEyes = m_InitParamsEyes_hook.GetTrampoline<InitParamsEyes_t>();
+            m_InitParamsEyes_hook.Enable();
+        } else {
+            Warning("[Shader Fixes] Failed to find InitParamsEyes\n");
+        }
+
+        if (InitEyes) {
+            Msg("[Shader Fixes] Found InitEyes at %p\n", InitEyes);
+            Detouring::Hook::Target target(InitEyes);
+            m_InitEyes_hook.Create(target, InitEyes_detour);
+            g_original_InitEyes = m_InitEyes_hook.GetTrampoline<InitEyes_t>();
+            m_InitEyes_hook.Enable();
+        } else {
+            Warning("[Shader Fixes] Failed to find InitEyes\n");
+        }
+
+        if (DrawEyes) {
+            Msg("[Shader Fixes] Found DrawEyes at %p\n", DrawEyes);
+            Detouring::Hook::Target target(DrawEyes);
+            m_DrawEyes_hook.Create(target, DrawEyes_detour);
+            g_original_DrawEyes = m_DrawEyes_hook.GetTrampoline<DrawEyes_t>();
+            m_DrawEyes_hook.Enable();
+        } else {
+            Warning("[Shader Fixes] Failed to find DrawEyes\n");
         }
 
         // Find and hook problematic patterns
@@ -283,6 +333,21 @@ void __fastcall ShaderAPIHooks::ParticleRender_detour(void* thisptr) {
     s_state.isProcessingParticle = false;
 }
 
+void __fastcall ShaderAPIHooks::InitParamsEyes_detour(void* thisptr) {
+    Msg("[Shader Fixes] InitParamsEyes called\n");
+    g_original_InitParamsEyes(thisptr);
+}
+
+bool __fastcall ShaderAPIHooks::InitEyes_detour(void* thisptr) {
+    Msg("[Shader Fixes] InitEyes called\n");
+    return g_original_InitEyes(thisptr);
+}
+
+void __fastcall ShaderAPIHooks::DrawEyes_detour(void* thisptr) {
+    Msg("[Shader Fixes] DrawEyes called\n");
+    g_original_DrawEyes(thisptr);
+}
+
 int __fastcall ShaderAPIHooks::DivisionFunction_detour(int a1, int a2, int dividend, int divisor) {
     void* returnAddress = _ReturnAddress();
     
@@ -407,6 +472,9 @@ void ShaderAPIHooks::Shutdown() {
     m_SetStreamSource_hook.Disable();
     m_SetVertexShader_hook.Disable();
     s_ConMsg_hook.Disable();
+    m_InitParamsEyes_hook.Disable();
+    m_InitEyes_hook.Disable();
+    m_DrawEyes_hook.Disable();
     
     // Log shutdown completion
     Msg("[Shader Fixes] Shutdown complete\n");

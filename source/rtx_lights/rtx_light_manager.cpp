@@ -482,29 +482,104 @@ void RTXLightManager::DestroyLight(remixapi_LightHandle handle) {
 }
 
 void RTXLightManager::CleanupInvalidLights() {
+    EnterCriticalSection(&m_lightCS);
+    
     try {
-        auto it = m_lights.begin();
-        while (it != m_lights.end()) {
-            bool isValid = false;
-            if (it->handle) {
-                // Try to draw the light as a validity check
-                auto result = m_remix->DrawLightInstance(it->handle);
-                isValid = static_cast<bool>(result); // Use the bool operator
-            }
-
-            if (!isValid) {
-                LogMessage("Removing invalid light handle: %p\n", it->handle);
-                if (it->handle) {
-                    m_remix->DestroyLight(it->handle);
+        // Track orphaned lights (in m_lights but not in m_lightsByEntityID)
+        std::vector<remixapi_LightHandle> orphanedLights;
+        for (const auto& light : m_lights) {
+            bool found = false;
+            for (const auto& pair : m_lightsByEntityID) {
+                if (pair.second.handle == light.handle) {
+                    found = true;
+                    break;
                 }
-                it = m_lights.erase(it);
-            } else {
-                ++it;
+            }
+            if (!found) {
+                orphanedLights.push_back(light.handle);
+            }
+        }
+
+        // Cleanup orphaned lights
+        if (!orphanedLights.empty()) {
+            LogMessage("Found %zu orphaned lights, cleaning up\n", orphanedLights.size());
+            for (auto handle : orphanedLights) {
+                if (handle) {
+                    m_remix->DestroyLight(handle);
+                }
+                auto it = std::remove_if(m_lights.begin(), m_lights.end(),
+                    [handle](const ManagedLight& light) {
+                        return light.handle == handle;
+                    });
+                m_lights.erase(it, m_lights.end());
             }
         }
     }
     catch (...) {
         LogMessage("Exception in CleanupInvalidLights\n");
+    }
+    
+    LeaveCriticalSection(&m_lightCS);
+}
+
+void RTXLightManager::ValidateResources() {
+    static uint32_t validationCounter = 0;
+    validationCounter++;
+
+    // Perform deep validation every 300 frames
+    if (validationCounter % 300 == 0) {
+        EnterCriticalSection(&m_lightCS);
+        
+        try {
+            size_t beforeSize = m_lights.size();
+            CleanupInvalidLights();
+            
+            // Check for mismatched counts
+            if (m_lights.size() != m_lightsByEntityID.size()) {
+                LogMessage("Warning: Light count mismatch - Lights: %zu, Entities: %zu\n",
+                    m_lights.size(), m_lightsByEntityID.size());
+            }
+
+            // Log memory usage
+            LogMessage("Resource validation - Lights: %zu, Memory: ~%zu bytes\n",
+                m_lights.size(),
+                (m_lights.size() * sizeof(ManagedLight)) + 
+                (m_lightsByEntityID.size() * sizeof(std::pair<uint64_t, ManagedLight>)));
+        }
+        catch (...) {
+            LogMessage("Exception in ValidateResources\n");
+        }
+        
+        LeaveCriticalSection(&m_lightCS);
+    }
+}
+
+bool RTXLightManager::IsHandleStillValid(remixapi_LightHandle handle) {
+    if (!handle || !m_remix) return false;
+
+    // Check if handle exists and can be drawn
+    try {
+        auto result = m_remix->DrawLightInstance(handle);
+        if (!static_cast<bool>(result)) {
+            return false;
+        }
+
+        // Verify handle isn't duplicated
+        int handleCount = 0;
+        for (const auto& light : m_lights) {
+            if (light.handle == handle) {
+                handleCount++;
+                if (handleCount > 1) {
+                    LogMessage("Warning: Duplicate handle %p detected\n", handle);
+                    return false;
+                }
+            }
+        }
+
+        return true;
+    }
+    catch (...) {
+        return false;
     }
 }
 
@@ -524,6 +599,9 @@ void RTXLightManager::DrawLights() {
     
     try {
         m_frameCount++;
+
+        // Add periodic validation
+        ValidateResources();
         
         // Batch validation
         for (const auto& light : m_lights) {
@@ -557,6 +635,14 @@ void RTXLightManager::DrawLights() {
                 } catch (...) {
                     LogMessage("Exception drawing light %p\n", light.handle);
                 }
+            }
+        }
+
+        // Add handle validation
+        for (const auto& light : m_lights) {
+            if (light.handle && !IsHandleStillValid(light.handle)) {
+                invalidLights.push_back(light.handle);
+                LogMessage("Invalid light handle detected: %p\n", light.handle);
             }
         }
 

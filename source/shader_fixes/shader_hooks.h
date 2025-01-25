@@ -143,4 +143,24 @@ private:
     // Add VEH handle storage
     PVOID m_vehHandle;
     PVOID m_vehHandlerDivision;
+
+    // Add new eye shader hooks
+    Detouring::Hook m_InitParamsEyes_hook;
+    Detouring::Hook m_InitEyes_hook;
+    Detouring::Hook m_DrawEyes_hook;
+
+    // Function pointer typedefs for the eye shader functions
+    typedef void(__fastcall* InitParamsEyes_t)(void* thisptr);
+    typedef bool(__fastcall* InitEyes_t)(void* thisptr);
+    typedef void(__fastcall* DrawEyes_t)(void* thisptr);
+
+    // Original function pointers
+    static InitParamsEyes_t g_original_InitParamsEyes;
+    static InitEyes_t g_original_InitEyes;
+    static DrawEyes_t g_original_DrawEyes;
+
+    // Detour functions
+    static void __fastcall InitParamsEyes_detour(void* thisptr);
+    static bool __fastcall InitEyes_detour(void* thisptr);
+    static void __fastcall DrawEyes_detour(void* thisptr);
 };

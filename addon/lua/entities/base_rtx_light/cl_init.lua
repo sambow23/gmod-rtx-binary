@@ -256,16 +256,30 @@ function ENT:OnRemove()
 end
 
 -- Add a hook to handle map cleanup
-hook.Add("PreCleanupMap", "RTXLight_PreCleanupMap", function()
+hook.Add("PreCleanupMap", "RTXLight_PreCleanup", function()
+    print("[RTX Light] Pre-cleanup map, destroying all lights...")
     for entIndex, ent in pairs(activeRTXLights) do
         if IsValid(ent) and ent.rtxLightHandle then
             pcall(function()
                 DestroyRTXLight(ent.rtxLightHandle)
             end)
             ent.rtxLightHandle = nil
+            ent.rtxEntityID = nil  -- Clear the ID so it gets regenerated
         end
     end
     table.Empty(activeRTXLights)
+end)
+
+-- Add emergency cleanup
+hook.Add("Shutdown", "RTXLight_Emergency", function()
+    print("[RTX Light] Emergency cleanup on shutdown")
+    for entIndex, ent in pairs(activeRTXLights) do
+        if IsValid(ent) and ent.rtxLightHandle then
+            pcall(function()
+                DestroyRTXLight(ent.rtxLightHandle)
+            end)
+        end
+    end
 end)
 
 net.Receive("RTXLight_Cleanup", function()

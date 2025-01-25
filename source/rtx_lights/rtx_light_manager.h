@@ -8,6 +8,8 @@
 #include <mutex>
 #include <atomic>
 #include <Windows.h>
+#include <utility>
+#include <unordered_map>
 
 class RTXLightManager {
 public:
@@ -53,6 +55,8 @@ public:
     void Initialize(remix::Interface* remixInterface);
     void Shutdown();
     void CleanupInvalidLights();
+    void ValidateResources();
+    bool IsHandleStillValid(remixapi_LightHandle handle);
 
 private:
     RTXLightManager();
