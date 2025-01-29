@@ -89,6 +89,7 @@ private:
     static bool ValidatePrimitiveParams(UINT MinVertexIndex, UINT NumVertices, UINT PrimitiveCount);
     static bool ValidateVertexShader(IDirect3DVertexShader9* pShader);
     static bool IsParticleSystem();
+    static bool IsDeviceReady();
     static void LogShaderError(const char* format, ...);
 
     // State management
@@ -145,6 +146,7 @@ private:
     PVOID m_vehHandlerDivision;
 
     // Add new eye shader hooks
+    // Change these from static to member variables
     Detouring::Hook m_InitParamsEyes_hook;
     Detouring::Hook m_InitEyes_hook;
     Detouring::Hook m_DrawEyes_hook;
@@ -159,7 +161,7 @@ private:
     static InitEyes_t g_original_InitEyes;
     static DrawEyes_t g_original_DrawEyes;
 
-    // Detour functions
+    // Detour functions - update signatures
     static void __fastcall InitParamsEyes_detour(void* thisptr);
     static bool __fastcall InitEyes_detour(void* thisptr);
     static void __fastcall DrawEyes_detour(void* thisptr);

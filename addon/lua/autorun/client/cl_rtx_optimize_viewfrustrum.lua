@@ -4,8 +4,19 @@ if not CLIENT then return end
 local cv_enabled = CreateClientConVar("fr_enabled", "1", true, false, "Enable large render bounds for all entities")
 local cv_bounds_size = CreateClientConVar("fr_bounds_size", "4096", true, false, "Size of render bounds")
 local cv_rtx_updater_distance = CreateClientConVar("fr_rtx_distance", "2048", true, false, "Maximum render distance for RTX light updaters")
+local cv_distance_scaling = CreateClientConVar("fr_distance_scaling", "1", true, false, "Enable distance-based render bounds scaling")
+local cv_min_distance = CreateClientConVar("fr_min_distance", "256", true, false, "Distance at which scaling begins")
+local cv_max_distance = CreateClientConVar("fr_max_distance", "8192", true, false, "Distance at which maximum bounds are reached")
+local cv_min_bounds = CreateClientConVar("fr_min_bounds", "256", true, false, "Minimum render bounds size")
+local cv_behind_scale = CreateClientConVar("fr_behind_scale", "1.5", true, false, "Multiplier for bounds size behind player")
+local cv_scale_power = CreateClientConVar("fr_scale_power", "1.5", true, false, "Power curve for distance scaling (higher = more gradual)")
+local cv_update_frequency = CreateClientConVar("fr_update_freq", "0.25", true, false, "How often to update bounds (in seconds)")
+local cv_max_per_frame = CreateClientConVar("fr_max_updates", "10", true, false, "Maximum number of entities to update per frame")
+local cv_behind_player_culling = CreateClientConVar("fr_behind_culling", "1", true, false, "Enable special handling of objects behind the player")
 
--- Cache the bounds vectors
+
+
+-- Cache
 local boundsSize = cv_bounds_size:GetFloat()
 local mins = Vector(-boundsSize, -boundsSize, -boundsSize)
 local maxs = Vector(boundsSize, boundsSize, boundsSize)
@@ -19,6 +30,16 @@ local processingQueue = {}
 local isProcessing = false
 local progressNotification = nil
 local totalEntitiesToProcess = 0
+local PARTITION_SIZE = 1024
+local spatialPartitions = {}
+local BOUNDS_UPDATE_INTERVAL = 0.25
+local lastBoundsUpdate = 0
+local lastPlayerPos = Vector(0, 0, 0)
+local lastPlayerAng = Angle(0, 0, 0)
+local updateQueue = {}
+local nextQueueUpdate = 0
+local lastPartitionUpdate = 0
+local PARTITION_UPDATE_INTERVAL = 1.0
 
 -- RTX Light Updater model list
 local RTX_UPDATER_MODELS = {
@@ -35,6 +56,147 @@ local SPECIAL_ENTITIES = {
     ["rtx_lightupdater"] = true,
     ["rtx_lightupdatermanager"] = true
 }
+
+local function GetPartitionKey(pos)
+    -- Larger partition size for better performance
+    return math.floor(pos.x / (PARTITION_SIZE * 2)) .. ":" .. 
+           math.floor(pos.y / (PARTITION_SIZE * 2))
+end
+
+local function UpdateSpatialPartitions()
+    spatialPartitions = {}
+    local player = LocalPlayer()
+    if not IsValid(player) then return end
+    
+    for _, ent in ipairs(ents.GetAll()) do
+        if IsValid(ent) then
+            local key = GetPartitionKey(ent:GetPos())
+            spatialPartitions[key] = spatialPartitions[key] or {}
+            table.insert(spatialPartitions[key], ent)
+        end
+    end
+end
+
+-- Optimization: Better queue management
+local function UpdateEntityQueue()
+    if CurTime() < nextQueueUpdate then return end
+    nextQueueUpdate = CurTime() + cv_update_frequency:GetFloat()
+    
+    local player = LocalPlayer()
+    if not IsValid(player) then return end
+    
+    -- Only update partitions if player has moved significantly
+    local playerPos = player:GetPos()
+    if playerPos:DistToSqr(lastPlayerPos) > 10000 or -- 100 units squared
+       CurTime() - lastPartitionUpdate > PARTITION_UPDATE_INTERVAL then
+        UpdateSpatialPartitions()
+        lastPlayerPos = playerPos
+        lastPartitionUpdate = CurTime()
+    end
+    
+    -- Clear and rebuild queue
+    updateQueue = {}
+    
+    -- Get player's partition and adjacent ones
+    local playerKey = GetPartitionKey(playerPos)
+    local px, py = playerKey:match("(-?%d+):(-?%d+)")
+    px, py = tonumber(px), tonumber(py)
+    
+    -- Collect entities from relevant partitions
+    for x = -1, 1 do
+        for y = -1, 1 do
+            local key = (px + x) .. ":" .. (py + y)
+            if spatialPartitions[key] then
+                for _, ent in ipairs(spatialPartitions[key]) do
+                    if IsValid(ent) and not rtxUpdaterCache[ent] and 
+                       ent:GetClass() ~= "hdri_cube_editor" then
+                        table.insert(updateQueue, ent)
+                    end
+                end
+            end
+        end
+    end
+    
+    -- Sort queue by distance to player
+    table.sort(updateQueue, function(a, b)
+        if not IsValid(a) or not IsValid(b) then return false end
+        return a:GetPos():DistToSqr(playerPos) < b:GetPos():DistToSqr(playerPos)
+    end)
+end
+
+-- Optimization: More efficient GetBoundsSizeForDistance
+local cachedBoundsSizes = {}
+local lastBoundsUpdate = 0
+local BOUNDS_CACHE_LIFETIME = 0.5
+
+local function GetBoundsSizeForDistance(ent)
+    if not cv_distance_scaling:GetBool() then
+        return boundsSize
+    end
+
+    local player = LocalPlayer()
+    if not IsValid(player) or not IsValid(ent) then return boundsSize end
+    
+    -- Check cache
+    if cachedBoundsSizes[ent] and 
+       CurTime() - cachedBoundsSizes[ent].time < BOUNDS_CACHE_LIFETIME then
+        return cachedBoundsSizes[ent].size
+    end
+
+    local entPos = ent:GetPos()
+    local playerPos = player:GetPos()
+    local distance = entPos:Distance(playerPos)
+    
+    -- Early return if within minimum distance
+    if distance <= cv_min_distance:GetFloat() then
+        return cv_min_bounds:GetFloat()
+    end
+
+    -- Calculate base scaling factor
+    local minDist = cv_min_distance:GetFloat()
+    local maxDist = cv_max_distance:GetFloat()
+    local scaleFactor = math.Clamp((distance - minDist) / (maxDist - minDist), 0, 1)
+    
+    -- Apply power curve for more gradual scaling
+    local power = cv_scale_power:GetFloat()
+    scaleFactor = math.pow(scaleFactor, power)
+    
+    -- Only apply behind-player scaling if enabled
+    if cv_behind_player_culling:GetBool() then
+        local playerAng = player:EyeAngles()
+        local playerForward = playerAng:Forward()
+        local toEntity = (entPos - playerPos):GetNormalized()
+        local dotProduct = playerForward:Dot(toEntity)
+        
+        if dotProduct < 0 then
+            -- Gradually increase scale based on how far behind the player it is
+            local behindScale = Lerp(-dotProduct, 1, cv_behind_scale:GetFloat())
+            scaleFactor = scaleFactor * behindScale
+        end
+    end
+    
+    -- Calculate final bounds size
+    local finalSize = Lerp(scaleFactor, cv_min_bounds:GetFloat(), boundsSize)
+    
+    -- Add minimum padding based on entity's model bounds
+    if originalBounds[ent] then
+        local origMins, origMaxs = originalBounds[ent].mins, originalBounds[ent].maxs
+        local modelSize = math.max(
+            math.abs(origMaxs.x - origMins.x),
+            math.abs(origMaxs.y - origMins.y),
+            math.abs(origMaxs.z - origMins.z)
+        )
+        finalSize = math.max(finalSize, modelSize * 1.5)
+    end
+    
+    -- Cache the result
+    cachedBoundsSizes[ent] = {
+        size = finalSize,
+        time = CurTime()
+    }
+    
+    return finalSize
+end
 
 -- Helper function to identify RTX updaters
 local function IsRTXUpdater(ent)
@@ -95,7 +257,7 @@ local function SetEntityBounds(ent, useOriginal)
         
         -- Special handling for HDRI cube editor
         if ent:GetClass() == "hdri_cube_editor" then
-            local hdriSize = 32768 -- Maximum recommended size
+            local hdriSize = 32768
             local hdriBounds = Vector(hdriSize, hdriSize, hdriSize)
             ent:SetRenderBounds(-hdriBounds, hdriBounds)
             ent:DisableMatrix("RenderMultiply")
@@ -108,7 +270,24 @@ local function SetEntityBounds(ent, useOriginal)
             ent:DisableMatrix("RenderMultiply")
             ent:SetNoDraw(false)
         else
-            ent:SetRenderBounds(mins, maxs)
+            local scaledSize = GetBoundsSizeForDistance(ent)
+            local scaledMins = Vector(-scaledSize, -scaledSize, -scaledSize)
+            local scaledMaxs = Vector(scaledSize, scaledSize, scaledSize)
+            ent:SetRenderBounds(scaledMins, scaledMaxs)
+        end
+    end
+end
+
+-- Optimization: Frame budgeted updates
+local function ProcessQueuedUpdates()
+    local maxUpdates = cv_max_per_frame:GetInt()
+    local processed = 0
+    
+    while processed < maxUpdates and #updateQueue > 0 do
+        local ent = table.remove(updateQueue, 1)
+        if IsValid(ent) then
+            SetEntityBounds(ent, false)
+            processed = processed + 1
         end
     end
 end
@@ -191,6 +370,35 @@ hook.Add("InitPostEntity", "InitialBoundsSetup", function()
         end
     end)
 end)
+
+-- Clean up cache periodically
+timer.Create("FR_CacheCleaner", 5, 0, function()
+    local currentTime = CurTime()
+    for ent, data in pairs(cachedBoundsSizes) do
+        if not IsValid(ent) or currentTime - data.time > BOUNDS_CACHE_LIFETIME then
+            cachedBoundsSizes[ent] = nil
+        end
+    end
+end)
+
+-- Replace the Think hook with optimized version
+hook.Remove("Think", "FR_UpdateDynamicBounds")
+hook.Add("Think", "FR_UpdateDynamicBounds", function()
+    if not cv_enabled:GetBool() or not cv_distance_scaling:GetBool() then return end
+    
+    -- Update queue periodically
+    UpdateEntityQueue()
+    
+    -- Process a limited number of updates per frame
+    ProcessQueuedUpdates()
+end)
+
+-- Add performance monitoring
+local performanceStats = {
+    updateTime = 0,
+    entitiesProcessed = 0,
+    lastReset = 0
+}
 
 -- Map cleanup/reload handler
 hook.Add("OnReloaded", "RefreshStaticProps", function()
@@ -319,6 +527,11 @@ concommand.Add("fr_debug", function()
     print("Static Props Count:", #staticProps)
     print("Stored Original Bounds:", table.Count(originalBounds))
     print("RTX Updaters (Cached):", rtxUpdaterCount)
+    print("\nPerformance Statistics:")
+    print("Average Update Time:", string.format("%.3f ms", performanceStats.updateTime * 1000))
+    print("Entities in Queue:", #updateQueue)
+    print("Entities Processed:", performanceStats.entitiesProcessed)
+    print("Cached Bounds:", table.Count(cachedBoundsSizes))
 end)
 
 local function CreateSettingsPanel(panel)
@@ -347,6 +560,59 @@ local function CreateSettingsPanel(panel)
     local rtxDistanceSlider = panel:NumSlider("RTX Updater Distance", "fr_rtx_distance", 256, 32000, 0)
     rtxDistanceSlider:SetTooltip("Maximum render distance for RTX light updaters")
     
+    -- Add some spacing
+    panel:Help("")
+
+    -- Add distance scaling toggle
+    panel:CheckBox("Enable Distance-Based Scaling", "fr_distance_scaling")
+    
+    -- Add distance scaling settings
+    local minDistSlider = panel:NumSlider("Minimum Distance", "fr_min_distance", 64, 1024, 0)
+    minDistSlider:SetTooltip("Distance at which scaling begins")
+    
+    local maxDistSlider = panel:NumSlider("Maximum Distance", "fr_max_distance", 1024, 16384, 0)
+    maxDistSlider:SetTooltip("Distance at which maximum bounds are reached")
+    
+    local minBoundsSlider = panel:NumSlider("Minimum Bounds Size", "fr_min_bounds", 64, 1024, 0)
+    minBoundsSlider:SetTooltip("Minimum size of render bounds for close objects")
+
+    panel:Help("")
+    panel:Help("Behind-Player Culling Settings:")
+    
+    -- Add behind-player culling toggle
+    panel:CheckBox("Enable Behind-Player Culling", "fr_behind_culling")
+    
+    -- Only show these sliders if behind-player culling is enabled
+    local behindScaleSlider
+    local function UpdateBehindPlayerSettings()
+        if IsValid(behindScaleSlider) then
+            behindScaleSlider:SetEnabled(cv_behind_player_culling:GetBool())
+        end
+    end
+    
+    behindScaleSlider = panel:NumSlider("Behind Player Scale", "fr_behind_scale", 1, 3, 2)
+    behindScaleSlider:SetTooltip("Multiplier for bounds size when objects are behind the player")
+    
+    -- Update slider state when the checkbox changes
+    cvars.AddChangeCallback("fr_behind_culling", function(_, _, new)
+        UpdateBehindPlayerSettings()
+    end)
+    
+    -- Initial state
+    UpdateBehindPlayerSettings()
+    
+    -- Add some spacing
+    panel:Help("")
+
+    panel:Help("Performance Settings:")
+    
+    local updateFreqSlider = panel:NumSlider("Update Frequency", "fr_update_freq", 0.1, 1.0, 2)
+    updateFreqSlider:SetTooltip("How often to update bounds (in seconds)")
+    
+    local maxUpdatesSlider = panel:NumSlider("Max Updates Per Frame", "fr_max_updates", 1, 50, 0)
+    maxUpdatesSlider:SetTooltip("Maximum number of entities to update per frame")
+    
+
     -- Add some spacing
     panel:Help("")
     

@@ -125,44 +125,81 @@ void ShaderAPIHooks::Initialize() {
             return;
         }
 
-        // Eye shader signatures
-        static const char init_params_sig[] = "CF A1 10 00 E9 52 77 0A 00";
-        static const char init_eyes_sig[] = "9E 2D 04 00 E9 69 82 09 00";
-        static const char draw_eyes_sig[] = "E0 2C 05 00 E9 1B B9 04 00";
+        // Add verification of function signatures
+        auto VerifyFunction = [](void* addr, const char* name, const unsigned char* expectedBytes, size_t length) {
+            if (!addr) return false;
+            
+            __try {
+                unsigned char* bytes = reinterpret_cast<unsigned char*>(addr);
+                bool matches = true;
+                
+                Msg("[Shader Fixes] Verifying %s at %p:\n", name, addr);
+                Msg("Expected: ");
+                for (size_t i = 0; i < length; i++) {
+                    Msg("%02X ", expectedBytes[i]);
+                    if (bytes[i] != expectedBytes[i]) {
+                        matches = false;
+                    }
+                }
+                Msg("\nActual:   ");
+                for (size_t i = 0; i < length; i++) {
+                    Msg("%02X ", bytes[i]);
+                }
+                Msg("\n");
+                
+                return matches;
+            }
+            __except(EXCEPTION_EXECUTE_HANDLER) {
+                Warning("[Shader Fixes] Exception while verifying %s\n", name);
+                return false;
+            }
+        };
 
-        // Find and hook eye shader functions
-        auto InitParamsEyes = ScanSign(shaderapidx, init_params_sig, sizeof(init_params_sig) - 1);
-        auto InitEyes = ScanSign(shaderapidx, init_eyes_sig, sizeof(init_eyes_sig) - 1);
-        auto DrawEyes = ScanSign(shaderapidx, draw_eyes_sig, sizeof(draw_eyes_sig) - 1);
+        // Expected signatures based on the memory dump
+        const unsigned char InitParamsEyes_sig[] = { 0x8B, 0x74, 0x24, 0x60, 0x48, 0x8B, 0x7C, 0x24, 0x68 };
+        const unsigned char InitEyes_sig[] = { 0x07, 0x48, 0x83, 0xC4, 0x20, 0x5B };
+        const unsigned char DrawEyes_sig[] = { 0x48, 0x8B, 0x5C, 0x24, 0x30, 0x48, 0x8B, 0x74, 0x24, 0x38 };
 
-        if (InitParamsEyes) {
-            Msg("[Shader Fixes] Found InitParamsEyes at %p\n", InitParamsEyes);
+        // Known addresses from memory dump
+        void* InitParamsEyes = reinterpret_cast<void*>(0x9C75A4C5);
+        void* InitEyes = reinterpret_cast<void*>(0x9C7557AE);
+        void* DrawEyes = reinterpret_cast<void*>(0x9C75E69C);
+
+        // Verify addresses are within the module
+        MODULEINFO modInfo;
+        if (GetModuleInformation(GetCurrentProcess(), shaderapidx, &modInfo, sizeof(MODULEINFO))) {
+            uintptr_t moduleStart = reinterpret_cast<uintptr_t>(modInfo.lpBaseOfDll);
+            uintptr_t moduleEnd = moduleStart + modInfo.SizeOfImage;
+
+            // Adjust addresses relative to module base
+            InitParamsEyes = reinterpret_cast<void*>(moduleStart + (reinterpret_cast<uintptr_t>(InitParamsEyes) - 0x9C750000));
+            InitEyes = reinterpret_cast<void*>(moduleStart + (reinterpret_cast<uintptr_t>(InitEyes) - 0x9C750000));
+            DrawEyes = reinterpret_cast<void*>(moduleStart + (reinterpret_cast<uintptr_t>(DrawEyes) - 0x9C750000));
+        }
+
+        // Verify and hook functions with signature checking
+        if (VerifyFunction(InitParamsEyes, "InitParamsEyes", InitParamsEyes_sig, sizeof(InitParamsEyes_sig))) {
             Detouring::Hook::Target target(InitParamsEyes);
             m_InitParamsEyes_hook.Create(target, InitParamsEyes_detour);
             g_original_InitParamsEyes = m_InitParamsEyes_hook.GetTrampoline<InitParamsEyes_t>();
             m_InitParamsEyes_hook.Enable();
-        } else {
-            Warning("[Shader Fixes] Failed to find InitParamsEyes\n");
+            Msg("[Shader Fixes] Successfully hooked InitParamsEyes\n");
         }
 
-        if (InitEyes) {
-            Msg("[Shader Fixes] Found InitEyes at %p\n", InitEyes);
+        if (VerifyFunction(InitEyes, "InitEyes", InitEyes_sig, sizeof(InitEyes_sig))) {
             Detouring::Hook::Target target(InitEyes);
             m_InitEyes_hook.Create(target, InitEyes_detour);
             g_original_InitEyes = m_InitEyes_hook.GetTrampoline<InitEyes_t>();
             m_InitEyes_hook.Enable();
-        } else {
-            Warning("[Shader Fixes] Failed to find InitEyes\n");
+            Msg("[Shader Fixes] Successfully hooked InitEyes\n");
         }
 
-        if (DrawEyes) {
-            Msg("[Shader Fixes] Found DrawEyes at %p\n", DrawEyes);
+        if (VerifyFunction(DrawEyes, "DrawEyes", DrawEyes_sig, sizeof(DrawEyes_sig))) {
             Detouring::Hook::Target target(DrawEyes);
             m_DrawEyes_hook.Create(target, DrawEyes_detour);
             g_original_DrawEyes = m_DrawEyes_hook.GetTrampoline<DrawEyes_t>();
             m_DrawEyes_hook.Enable();
-        } else {
-            Warning("[Shader Fixes] Failed to find DrawEyes\n");
+            Msg("[Shader Fixes] Successfully hooked DrawEyes\n");
         }
 
         // Find and hook problematic patterns
@@ -333,19 +370,109 @@ void __fastcall ShaderAPIHooks::ParticleRender_detour(void* thisptr) {
     s_state.isProcessingParticle = false;
 }
 
+bool ShaderAPIHooks::IsDeviceReady() {
+    if (!g_pD3DDevice) return false;
+    
+    __try {
+        D3DDEVICE_CREATION_PARAMETERS params;
+        HRESULT hr = g_pD3DDevice->GetCreationParameters(&params);
+        return SUCCEEDED(hr);
+    }
+    __except(EXCEPTION_EXECUTE_HANDLER) {
+        Warning("[Shader Fixes] Exception checking D3D9 device state\n");
+        return false;
+    }
+    return false;
+}
+
 void __fastcall ShaderAPIHooks::InitParamsEyes_detour(void* thisptr) {
-    Msg("[Shader Fixes] InitParamsEyes called\n");
-    g_original_InitParamsEyes(thisptr);
+    __try {
+        if (!thisptr) {
+            Warning("[Shader Fixes] InitParamsEyes called with null thisptr\n");
+            return;
+        }
+
+        // Verify D3D device state before proceeding
+        if (!IsDeviceReady()) {
+            Warning("[Shader Fixes] D3D9 device not ready in InitParamsEyes\n");
+            return;
+        }
+
+        // Call original with device state protection
+        if (g_original_InitParamsEyes) {
+            __try {
+                g_original_InitParamsEyes(thisptr);
+                Warning("[Shader Fixes] InitParamsEyes completed successfully\n");
+            }
+            __except(EXCEPTION_EXECUTE_HANDLER) {
+                Warning("[Shader Fixes] Exception in original InitParamsEyes\n");
+            }
+        }
+    }
+    __except(EXCEPTION_EXECUTE_HANDLER) {
+        Warning("[Shader Fixes] Exception in InitParamsEyes_detour\n");
+    }
 }
 
 bool __fastcall ShaderAPIHooks::InitEyes_detour(void* thisptr) {
-    Msg("[Shader Fixes] InitEyes called\n");
-    return g_original_InitEyes(thisptr);
+    __try {
+        if (!thisptr) {
+            Warning("[Shader Fixes] InitEyes called with null thisptr\n");
+            return false;
+        }
+
+        // Verify D3D device state before proceeding
+        if (!IsDeviceReady()) {
+            Warning("[Shader Fixes] D3D9 device not ready in InitEyes\n");
+            return false;
+        }
+
+        // Call original with device state protection
+        if (g_original_InitEyes) {
+            __try {
+                bool result = g_original_InitEyes(thisptr);
+                Warning("[Shader Fixes] InitEyes completed with result: %d\n", result);
+                return result;
+            }
+            __except(EXCEPTION_EXECUTE_HANDLER) {
+                Warning("[Shader Fixes] Exception in original InitEyes\n");
+            }
+        }
+        return false;
+    }
+    __except(EXCEPTION_EXECUTE_HANDLER) {
+        Warning("[Shader Fixes] Exception in InitEyes_detour\n");
+        return false;
+    }
 }
 
 void __fastcall ShaderAPIHooks::DrawEyes_detour(void* thisptr) {
-    Msg("[Shader Fixes] DrawEyes called\n");
-    g_original_DrawEyes(thisptr);
+    __try {
+        if (!thisptr) {
+            Warning("[Shader Fixes] DrawEyes called with null thisptr\n");
+            return;
+        }
+
+        // Verify D3D device state before proceeding
+        if (!IsDeviceReady()) {
+            Warning("[Shader Fixes] D3D9 device not ready in DrawEyes\n");
+            return;
+        }
+
+        // Call original with device state protection
+        if (g_original_DrawEyes) {
+            __try {
+                g_original_DrawEyes(thisptr);
+                Warning("[Shader Fixes] DrawEyes completed successfully\n");
+            }
+            __except(EXCEPTION_EXECUTE_HANDLER) {
+                Warning("[Shader Fixes] Exception in original DrawEyes\n");
+            }
+        }
+    }
+    __except(EXCEPTION_EXECUTE_HANDLER) {
+        Warning("[Shader Fixes] Exception in DrawEyes_detour\n");
+    }
 }
 
 int __fastcall ShaderAPIHooks::DivisionFunction_detour(int a1, int a2, int dividend, int divisor) {
