@@ -15,6 +15,31 @@ local SPECIAL_ENTITIES = {
 local managedEntities = {}
 local staticProps = {}
 
+local function GetLightType(light)
+    -- Base light types
+    if light.style then
+        if light.style ~= "0" then
+            return "Dynamic Light"
+        end
+    end
+    
+    if light.classname == "light" then
+        return "Point Light"
+    elseif light.classname == "light_spot" then
+        return "Spot Light"
+    elseif light.classname == "light_environment" then
+        return "Environment Light"
+    elseif light.classname == "light_dynamic" then
+        return "Dynamic Light"
+    end
+    
+    return "Unknown Light"
+end
+
+local function FormatVector(vec)
+    return string.format("%.1f %.1f %.1f", vec.x, vec.y, vec.z)
+end
+
 -- Helper function to identify RTX-related entities
 local function IsRTXEntity(ent)
     if not IsValid(ent) then return end
@@ -58,7 +83,7 @@ local function SetupStaticProps()
             prop:SetModelScale(propData:GetScale())
             
             -- Set large render bounds
-            local bounds = Vector(8196, 8196, 16144)
+            local bounds = Vector(32768, 32768, 32768)
             prop:SetRenderBounds(-bounds, bounds)
             
             staticProps[prop] = true
