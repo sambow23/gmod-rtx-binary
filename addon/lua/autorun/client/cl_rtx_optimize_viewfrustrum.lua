@@ -1,231 +1,258 @@
 if not CLIENT then return end
 
 -- ConVars
-local cv_enabled = CreateClientConVar("fr_enabled", "1", true, false, "Enable large render bounds for all entities")
-local cv_bounds_size = CreateClientConVar("fr_bounds_size", "256", true, false, "Size of render bounds")
-local cv_rtx_updater_distance = CreateClientConVar("fr_rtx_distance", "256", true, false, "Maximum render distance for RTX light updaters")
+local cv_enabled = CreateClientConVar("fr_enabled", "1", true, false, "Enable RTX frustum optimization")
+local cv_static_props = CreateClientConVar("fr_static_props", "1", true, false, "Enable optimization for static props")
+local cv_debug_cubes = CreateClientConVar("fr_debug_light_cubes", "0", true, false, "Show debug cubes for light optimization")
 
--- Cache the bounds vectors
-local boundsSize = cv_bounds_size:GetFloat()
-local mins = Vector(-boundsSize, -boundsSize, -boundsSize)
-local maxs = Vector(boundsSize, boundsSize, boundsSize)
-local DEBOUNCE_TIME = 0.1
-local boundsUpdateTimer = "FR_BoundsUpdate"
-local rtxUpdateTimer = "FR_RTXUpdate"
-local rtxUpdaterCache = {}
-local rtxUpdaterCount = 0
-local BATCH_SIZE = CreateClientConVar("fr_batch_size", "100", true, false, "How many entities to process per frame")
-local processingQueue = {}
-local isProcessing = false
-local progressNotification = nil
-local totalEntitiesToProcess = 0
-
--- RTX Light Updater model list
-local RTX_UPDATER_MODELS = {
-    ["models/hunter/plates/plate.mdl"] = true,
-    ["models/hunter/blocks/cube025x025x025.mdl"] = true
-}
-
--- Cache for static props
-local staticProps = {}
-local originalBounds = {} -- Store original render bounds
-
+-- Special entities that should always be visible
 local SPECIAL_ENTITIES = {
     ["hdri_cube_editor"] = true,
     ["rtx_lightupdater"] = true,
     ["rtx_lightupdatermanager"] = true
 }
 
--- Helper function to identify RTX updaters
-local function IsRTXUpdater(ent)
-    if not IsValid(ent) then return false end
-    local class = ent:GetClass()
-    return SPECIAL_ENTITIES[class] or 
-           (ent:GetModel() and RTX_UPDATER_MODELS[ent:GetModel()])
-end
+-- Cache for managed entities
+local managedEntities = {}
+local staticProps = {}
+local debugLightCubes = {}
 
--- Store original bounds for an entity
-local function StoreOriginalBounds(ent)
-    if not IsValid(ent) or originalBounds[ent] then return end
-    local mins, maxs = ent:GetRenderBounds()
-    originalBounds[ent] = {mins = mins, maxs = maxs}
-end
-
--- Add RTX updater cache management functions
-local function AddToRTXCache(ent)
-    if not IsValid(ent) or rtxUpdaterCache[ent] then return end
-    if IsRTXUpdater(ent) then
-        rtxUpdaterCache[ent] = true
-        rtxUpdaterCount = rtxUpdaterCount + 1
-        
-        -- Set initial RTX bounds
-        local rtxDistance = cv_rtx_updater_distance:GetFloat()
-        local rtxBoundsSize = Vector(rtxDistance, rtxDistance, rtxDistance)
-        ent:SetRenderBounds(-rtxBoundsSize, rtxBoundsSize)
-        ent:DisableMatrix("RenderMultiply")
-        ent:SetNoDraw(false)
-        
-        -- Special handling for hdri_cube_editor to ensure it's never culled
-        if ent:GetClass() == "hdri_cube_editor" then
-            -- Using a very large value for HDRI cube editor
-            local hdriSize = 32768 -- Maximum recommended size
-            local hdriBounds = Vector(hdriSize, hdriSize, hdriSize)
-            ent:SetRenderBounds(-hdriBounds, hdriBounds)
+local function GetLightType(light)
+    -- Base light types
+    if light.style then
+        if light.style ~= "0" then
+            return "Dynamic Light"
         end
     end
-end
-
-local function RemoveFromRTXCache(ent)
-    if rtxUpdaterCache[ent] then
-        rtxUpdaterCache[ent] = nil
-        rtxUpdaterCount = rtxUpdaterCount - 1
+    
+    if light.classname == "light" then
+        return "Point Light"
+    elseif light.classname == "light_spot" then
+        return "Spot Light"
+    elseif light.classname == "light_environment" then
+        return "Environment Light"
+    elseif light.classname == "light_dynamic" then
+        return "Dynamic Light"
     end
+    
+    return "Unknown Light"
 end
 
--- Set bounds for a single entity
-local function SetEntityBounds(ent, useOriginal)
+local function FormatVector(vec)
+    if not vec then return "0.0 0.0 0.0" end
+    if type(vec) == "string" then
+        -- Some map entities store vectors as strings like "0 0 0"
+        return vec
+    end
+    -- Convert string vector format to actual Vector if needed
+    if not vec.x then
+        local x, y, z = string.match(tostring(vec), "([-0-9.]+) ([-0-9.]+) ([-0-9.]+)")
+        if x and y and z then
+            return string.format("%.1f %.1f %.1f", tonumber(x), tonumber(y), tonumber(z))
+        end
+        return "0.0 0.0 0.0"
+    end
+    return string.format("%.1f %.1f %.1f", vec.x, vec.y, vec.z)
+end
+
+local function CreateLightCube(lightData)
+    if not lightData.origin then return end
+    
+    local cube = ClientsideModel("models/hunter/blocks/cube025x025x025.mdl")
+    if not IsValid(cube) then return end
+    
+    -- Set position and properties
+    cube:SetPos(lightData.origin)
+    cube:SetAngles(Angle(0, 0, 0))
+    cube:SetColor(Color(255, 255, 255, 1)) -- Almost invisible
+    cube:SetRenderMode(RENDERMODE_TRANSALPHA)
+    cube:SetModelScale(0.1) -- Make it small
+    
+    -- Set different render bounds based on light type
+    if lightData.classname == "light_environment" then
+        local bounds = Vector(32768, 32768, 32768) -- Very large bounds for environment lights
+        cube:SetRenderBounds(-bounds, bounds)
+    else
+        local bounds = Vector(256, 256, 256) -- Standard size for other lights
+        cube:SetRenderBounds(-bounds, bounds)
+    end
+    
+    return cube
+end
+
+local function CleanupDebugCubes()
+    for _, cube in pairs(debugLightCubes) do
+        if IsValid(cube) then
+            cube:Remove()
+        end
+    end
+    debugLightCubes = {}
+end
+
+local function SetupDebugCubes()
+    -- Clean up existing cubes first
+    CleanupDebugCubes()
+    
+    -- Only create if debug cubes are enabled
+    if not cv_debug_cubes:GetBool() then return end
+    
+    if not NikNaks.CurrentMap then
+        print("No map data available!")
+        return
+    end
+
+    local lightClasses = {
+        "light",
+        "light_spot",
+        "light_environment",
+        "light_dynamic",
+        "light_directional",
+        "light_point",
+        "light_glspot"
+    }
+
+    -- Create cubes for all lights
+    for _, className in ipairs(lightClasses) do
+        local found = NikNaks.CurrentMap:FindByClass(className)
+        for _, light in ipairs(found) do
+            local cube = CreateLightCube(light)
+            if cube then
+                table.insert(debugLightCubes, cube)
+            end
+        end
+    end
+    
+    print("Created " .. #debugLightCubes .. " light debug cubes")
+end
+
+-- Helper function to identify RTX-related entities
+local function IsRTXEntity(ent)
+    if not IsValid(ent) then return end
+    return SPECIAL_ENTITIES[ent:GetClass()]
+end
+
+-- Set entity visibility state
+local function SetEntityVisibility(ent, enable)
     if not IsValid(ent) then return end
     
-    if useOriginal then
-        if originalBounds[ent] then
-            ent:SetRenderBounds(originalBounds[ent].mins, originalBounds[ent].maxs)
-        end
+    if enable then
+        -- Basic visibility flags that won't interfere with RTX
+        ent:AddEFlags(EFL_FORCE_CHECK_TRANSMIT)
+        ent:SetRenderMode(RENDERMODE_NORMAL)
+        ent:DrawShadow(true)
     else
-        StoreOriginalBounds(ent)
-        
-        -- Special handling for HDRI cube editor
-        if ent:GetClass() == "hdri_cube_editor" then
-            local hdriSize = 32768 -- Maximum recommended size
-            local hdriBounds = Vector(hdriSize, hdriSize, hdriSize)
-            ent:SetRenderBounds(-hdriBounds, hdriBounds)
-            ent:DisableMatrix("RenderMultiply")
-            ent:SetNoDraw(false)
-        -- Use cache to check for RTX updaters
-        elseif rtxUpdaterCache[ent] then
-            local rtxDistance = cv_rtx_updater_distance:GetFloat()
-            local rtxBoundsSize = Vector(rtxDistance, rtxDistance, rtxDistance)
-            ent:SetRenderBounds(-rtxBoundsSize, rtxBoundsSize)
-            ent:DisableMatrix("RenderMultiply")
-            ent:SetNoDraw(false)
-        else
-            ent:SetRenderBounds(mins, maxs)
-        end
+        ent:RemoveEFlags(EFL_FORCE_CHECK_TRANSMIT)
     end
 end
 
--- Create clientside static props
-local function CreateStaticProps()
+-- Handle static props
+local function SetupStaticProps()
     -- Clear existing static props
-    for _, prop in pairs(staticProps) do
+    for prop in pairs(staticProps) do
         if IsValid(prop) then
             prop:Remove()
         end
     end
     staticProps = {}
 
-    if cv_enabled:GetBool() and NikNaks and NikNaks.CurrentMap then
-        local props = NikNaks.CurrentMap:GetStaticProps()
-        for _, propData in pairs(props) do
-            local prop = ClientsideModel(propData:GetModel())
-            if IsValid(prop) then
-                prop:SetPos(propData:GetPos())
-                prop:SetAngles(propData:GetAngles())
-                prop:SetRenderBounds(mins, maxs)
-                prop:SetColor(propData:GetColor())
-                prop:SetModelScale(propData:GetScale())
-                table.insert(staticProps, prop)
-            end
+    -- Only proceed if enabled and NikNaks is available
+    if not cv_enabled:GetBool() or not cv_static_props:GetBool() or not NikNaks or not NikNaks.CurrentMap then return end
+
+    local props = NikNaks.CurrentMap:GetStaticProps()
+    for _, propData in pairs(props) do
+        local prop = ClientsideModel(propData:GetModel())
+        if IsValid(prop) then
+            prop:SetPos(propData:GetPos())
+            prop:SetAngles(propData:GetAngles())
+            prop:SetColor(propData:GetColor())
+            prop:SetModelScale(propData:GetScale())
+            
+            -- Set large render bounds
+            local bounds = Vector(32768, 32768, 32768)
+            prop:SetRenderBounds(-bounds, bounds)
+            
+            staticProps[prop] = true
+            managedEntities[prop] = true
         end
     end
 end
-
--- Update all entities
-local function UpdateAllEntities(useOriginal)
-    -- Clear any existing processing
-    processingQueue = {}
-    isProcessing = false
-    
-    -- Gather valid entities and process them
-    local entities = ents.GetAll()
-    for _, ent in ipairs(entities) do
-        if IsValid(ent) then
-            SetEntityBounds(ent, useOriginal)
-        end
-    end
-    
-    -- Signal completion
-    hook.Run("FR_FinishedProcessing")
-end
-
--- Status reporting
-local lastProcessStatus = 0
-hook.Add("HUDPaint", "FR_ProcessingStatus", function()
-    if not isProcessing then return end
-    
-    -- Update status once per second
-    if CurTime() - lastProcessStatus > 1 then
-        lastProcessStatus = CurTime()
-        
-        local progress = math.Round((1 - (#processingQueue / #ents.GetAll())) * 100)
-        notification.AddProgress("FR_Processing", "Updating Render Bounds: " .. progress .. "%", progress / 100)
-    end
-end)
 
 -- Hook for new entities
-hook.Add("OnEntityCreated", "SetLargeRenderBounds", function(ent)
+hook.Add("OnEntityCreated", "RTX_PVS_Optimization", function(ent)
     if not IsValid(ent) then return end
     
     timer.Simple(0, function()
-        if IsValid(ent) then
-            AddToRTXCache(ent)
-            SetEntityBounds(ent, not cv_enabled:GetBool())
+        if not IsValid(ent) or not cv_enabled:GetBool() then return end
+        
+        if IsRTXEntity(ent) then
+            SetEntityVisibility(ent, true)
+            managedEntities[ent] = true
         end
     end)
 end)
--- Initial setup
-hook.Add("InitPostEntity", "InitialBoundsSetup", function()
+
+cvars.AddChangeCallback("fr_debug_light_cubes", function(_, _, new)
+    if tobool(new) then
+        SetupDebugCubes()
+    else
+        CleanupDebugCubes()
+    end
+end)
+
+-- Add cleanup to map changes
+hook.Add("OnReloaded", "CleanupLightDebugCubes", function()
     timer.Simple(1, function()
-        if cv_enabled:GetBool() then
-            UpdateAllEntities(false)
-            CreateStaticProps()
+        if cv_debug_cubes:GetBool() then
+            SetupDebugCubes()
         end
     end)
+end)
+
+-- Add to initial setup
+hook.Add("InitPostEntity", "InitialLightDebugCubes", function()
+    timer.Simple(1, function()
+        if cv_debug_cubes:GetBool() then
+            SetupDebugCubes()
+        end
+    end)
+end)
+
+-- Entity cleanup
+hook.Add("EntityRemoved", "RTX_PVS_Cleanup", function(ent)
+    managedEntities[ent] = nil
+    staticProps[ent] = nil
 end)
 
 -- Map cleanup/reload handler
 hook.Add("OnReloaded", "RefreshStaticProps", function()
-    -- Clear bounds cache
-    originalBounds = {}
-    
-    -- Remove existing static props
-    for _, prop in pairs(staticProps) do
-        if IsValid(prop) then
-            prop:Remove()
+    timer.Simple(1, SetupStaticProps)
+end)
+
+-- Initial setup
+hook.Add("InitPostEntity", "InitialRTXSetup", function()
+    timer.Simple(1, SetupStaticProps)
+end)
+
+-- ConVar change handlers
+cvars.AddChangeCallback("fr_enabled", function(_, _, new)
+    local enabled = tobool(new)
+    for ent in pairs(managedEntities) do
+        if IsValid(ent) then
+            SetEntityVisibility(ent, enabled)
         end
     end
-    staticProps = {}
     
-    -- Recreate if enabled
-    if cv_enabled:GetBool() then
-        timer.Simple(1, CreateStaticProps)
+    if enabled and cv_static_props:GetBool() then
+        SetupStaticProps()
     end
 end)
 
--- Handle ConVar changes
-cvars.AddChangeCallback("fr_enabled", function(_, _, new)
+cvars.AddChangeCallback("fr_static_props", function(_, _, new)
     local enabled = tobool(new)
-    
-    if enabled then
-        UpdateAllEntities(false)
-        -- Delay static prop creation until entity processing is done
-        hook.Add("FR_FinishedProcessing", "FR_CreateStaticProps", function()
-            CreateStaticProps()
-            hook.Remove("FR_FinishedProcessing", "FR_CreateStaticProps")
-        end)
+    if enabled and cv_enabled:GetBool() then
+        SetupStaticProps()
     else
-        UpdateAllEntities(true)
-        -- Remove static props
-        for _, prop in pairs(staticProps) do
+        for prop in pairs(staticProps) do
             if IsValid(prop) then
                 prop:Remove()
             end
@@ -234,185 +261,145 @@ cvars.AddChangeCallback("fr_enabled", function(_, _, new)
     end
 end)
 
-cvars.AddChangeCallback("fr_bounds_size", function(_, _, new)
-    -- Cancel any pending updates
-    if timer.Exists(boundsUpdateTimer) then
-        timer.Remove(boundsUpdateTimer)
-    end
-    
-    -- Schedule the update
-    timer.Create(boundsUpdateTimer, DEBOUNCE_TIME, 1, function()
-        boundsSize = tonumber(new)
-        mins = Vector(-boundsSize, -boundsSize, -boundsSize)
-        maxs = Vector(boundsSize, boundsSize, boundsSize)
-        
-        if cv_enabled:GetBool() then
-            UpdateAllEntities(false)
-            CreateStaticProps()
-        end
-    end)
-end)
-
-
-cvars.AddChangeCallback("fr_rtx_distance", function(_, _, new)
-    if not cv_enabled:GetBool() then return end
-    
-    if timer.Exists(rtxUpdateTimer) then
-        timer.Remove(rtxUpdateTimer)
-    end
-    
-    timer.Create(rtxUpdateTimer, DEBOUNCE_TIME, 1, function()
-        local rtxDistance = tonumber(new)
-        local rtxBoundsSize = Vector(rtxDistance, rtxDistance, rtxDistance)
-        
-        -- Use cache instead of iterating all entities
-        for ent in pairs(rtxUpdaterCache) do
-            if IsValid(ent) then
-                ent:SetRenderBounds(-rtxBoundsSize, rtxBoundsSize)
-            else
-                RemoveFromRTXCache(ent)
-            end
-        end
-    end)
-end)
-
--- ConCommand to refresh all entities' bounds
+-- Refresh command
 concommand.Add("fr_refresh", function()
-    -- Clear bounds cache
-    originalBounds = {}
-    
     if cv_enabled:GetBool() then
-        boundsSize = cv_bounds_size:GetFloat()
-        mins = Vector(-boundsSize, -boundsSize, -boundsSize)
-        maxs = Vector(boundsSize, boundsSize, boundsSize)
-        
-        UpdateAllEntities(false)
-        CreateStaticProps()
-    else
-        UpdateAllEntities(true)
-    end
-    
-    print("Refreshed render bounds for all entities" .. (cv_enabled:GetBool() and " with large bounds" or " with original bounds"))
-end)
-
--- Entity cleanup
-hook.Add("EntityRemoved", "CleanupRTXCache", function(ent)
-    RemoveFromRTXCache(ent)
-    originalBounds[ent] = nil
-end)
-
-local debugInfo = {
-    totalProcessed = 0,
-    lastBatchTime = 0,
-    averageBatchTime = 0
-}
-
--- Debug command
-concommand.Add("fr_debug", function()
-    print("\nRTX Frustum Optimization Debug:")
-    print("Enabled:", cv_enabled:GetBool())
-    print("Batch Size:", BATCH_SIZE:GetInt())
-    print("Currently Processing:", isProcessing)
-    print("Queued Entities:", #processingQueue)
-    print("Total Processed:", debugInfo.totalProcessed)
-    print("Average Batch Time:", string.format("%.3f ms", debugInfo.averageBatchTime * 1000))
-    print("Static Props Count:", #staticProps)
-    print("Stored Original Bounds:", table.Count(originalBounds))
-    print("RTX Updaters (Cached):", rtxUpdaterCount)
-end)
-
-local function CreateSettingsPanel(panel)
-    -- Clear the panel first
-    panel:ClearControls()
-    
-    -- Create a scroll panel to contain everything
-    local scrollPanel = vgui.Create("DScrollPanel", panel)
-    scrollPanel:Dock(FILL)
-    scrollPanel:DockMargin(0, 0, 0, 0)
-    
-    -- Enable/Disable Toggle
-    panel:CheckBox("Enable RTX View Frustrum", "fr_enabled")
-    
-    -- Add some spacing
-    panel:Help("")
-    
-    -- Bounds Size Slider
-    local boundsSlider = panel:NumSlider("Render Bounds Size", "fr_bounds_size", 256, 32000, 0)
-    boundsSlider:SetTooltip("Size of render bounds for regular entities")
-    
-    -- Add some spacing
-    panel:Help("")
-    
-    -- RTX Updater Distance Slider
-    local rtxDistanceSlider = panel:NumSlider("RTX Updater Distance", "fr_rtx_distance", 256, 32000, 0)
-    rtxDistanceSlider:SetTooltip("Maximum render distance for RTX light updaters")
-    
-    -- Add some spacing
-    panel:Help("")
-    
-    -- Refresh Button
-    local refreshBtn = panel:Button("Refresh All Bounds")
-    function refreshBtn.DoClick()
-        RunConsoleCommand("fr_refresh")
-        surface.PlaySound("buttons/button14.wav")
-    end
-    
-    -- Debug Button
-    local debugBtn = panel:Button("Print Debug Info")
-    function debugBtn.DoClick()
-        RunConsoleCommand("fr_debug")
-        surface.PlaySound("buttons/button14.wav")
-    end
-    
-    -- Add more spacing before status
-    panel:Help("")
-    panel:Help("")
-    
-    -- Status Label Container
-    local statusContainer = vgui.Create("DPanel", panel)
-    statusContainer:Dock(BOTTOM)
-    statusContainer:SetTall(80) -- Adjust height as needed
-    statusContainer:DockMargin(0, 5, 0, 0)
-    statusContainer.Paint = function(self, w, h)
-        surface.SetDrawColor(0, 0, 0, 50)
-        surface.DrawRect(0, 0, w, h)
-    end
-    
-    -- Status Label
-    local status = vgui.Create("DLabel", statusContainer)
-    status:Dock(FILL)
-    status:DockMargin(5, 5, 5, 5)
-    status:SetText("Status Information:")
-    status:SetWrap(true)
-    
-    -- Update status periodically
-    function status:Think()
-        if self.NextUpdate and self.NextUpdate > CurTime() then return end
-        self.NextUpdate = CurTime() + 1
-        
-        local rtxCount = 0
-        for _, ent in ipairs(ents.GetAll()) do
-            if IsValid(ent) and IsRTXUpdater(ent) then
-                rtxCount = rtxCount + 1
+        for ent in pairs(managedEntities) do
+            if IsValid(ent) then
+                SetEntityVisibility(ent, true)
             end
         end
-        
-        local statusText = string.format(
-            "Status Information:\n\n" ..
-            "Static Props: %d\n" ..
-            "RTX Updaters: %d\n" ..
-            "Stored Bounds: %d",
-            #staticProps,
-            rtxCount,
-            table.Count(originalBounds)
-        )
-        self:SetText(statusText)
+        if cv_static_props:GetBool() then
+            SetupStaticProps()
+        end
+        if cv_debug_cubes:GetBool() then
+            SetupDebugCubes()
+        end
+        print("Refreshed RTX optimization")
     end
-end
+end)
 
--- Add to Utilities menu
-hook.Add("PopulateToolMenu", "RTXFrustumOptimizationMenu", function()
-    spawnmenu.AddToolMenuOption("Utilities", "User", "RTX_OVF", "#RTX View Frustum", "", "", function(panel)
-        CreateSettingsPanel(panel)
+-- Settings panel
+hook.Add("PopulateToolMenu", "RTXOptimizationMenu", function()
+    spawnmenu.AddToolMenuOption("Utilities", "User", "RTX_OPT", "#RTX Optimization", "", "", function(panel)
+        panel:ClearControls()
+        
+        panel:CheckBox("Enable RTX Optimization", "fr_enabled")
+        panel:ControlHelp("Optimize entity visibility for RTX")
+        
+        panel:Help("")
+        
+        panel:CheckBox("Enable Static Props Optimization", "fr_static_props")
+        panel:ControlHelp("Apply optimization to map's static props")
+        
+        panel:Help("")
+        
+        panel:CheckBox("Show Light Debug Cubes", "fr_debug_light_cubes")
+        panel:ControlHelp("Show debug cubes for light optimization")
+        
+        panel:Help("")
+        
+        local refreshBtn = panel:Button("Refresh")
+        function refreshBtn.DoClick()
+            RunConsoleCommand("fr_refresh")
+            surface.PlaySound("buttons/button14.wav")
+        end
+        
+        local debugBtn = panel:Button("Debug Info")
+        function debugBtn.DoClick()
+            local rtxCount = 0
+            local propCount = 0
+            local cubeCount = #debugLightCubes
+            
+            for ent in pairs(managedEntities) do
+                if IsValid(ent) then
+                    if staticProps[ent] then
+                        propCount = propCount + 1
+                    else
+                        rtxCount = rtxCount + 1
+                    end
+                end
+            end
+            
+            print("\nRTX Optimization Status:")
+            print("Enabled:", cv_enabled:GetBool())
+            print("Static Props Enabled:", cv_static_props:GetBool())
+            print("Debug Cubes Enabled:", cv_debug_cubes:GetBool())
+            print("RTX Entities:", rtxCount)
+            print("Static Props:", propCount)
+            print("Light Debug Cubes:", cubeCount)
+        end
     end)
+end)
+
+concommand.Add("show_map_lights", function(ply, cmd, args)
+    if not NikNaks.CurrentMap then
+        print("No map data available!")
+        return
+    end
+
+    local lightClasses = {
+        "light",
+        "light_spot",
+        "light_environment",
+        "light_dynamic",
+        "light_directional",
+        "light_point",
+        "light_glspot"
+    }
+
+    local lights = {}
+    local totalLights = 0
+
+    -- Gather all lights
+    for _, className in ipairs(lightClasses) do
+        local found = NikNaks.CurrentMap:FindByClass(className)
+        for _, light in ipairs(found) do
+            totalLights = totalLights + 1
+            table.insert(lights, light)
+        end
+    end
+
+    -- Print header
+    print("\n=== Map Lights Information ===")
+    print("Total Lights Found: " .. totalLights)
+    print("---------------------------")
+
+    -- Print each light's information
+    for i, light in ipairs(lights) do
+        print("\nLight #" .. i)
+        print("Type: " .. GetLightType(light))
+        
+        -- Safely handle origin
+        if light.origin then
+            print("Position: " .. FormatVector(light.origin))
+        else
+            print("Position: Not specified")
+        end
+        
+        -- Print brightness/color if available
+        if light._light then
+            print("Light Value: " .. tostring(light._light))
+        end
+        
+        -- Safely handle rendercolor
+        if light.rendercolor then
+            print("Color: " .. FormatVector(light.rendercolor))
+        end
+        
+        -- Print spot light specific info
+        if light.classname == "light_spot" then
+            if light.angles then
+                print("Angles: " .. FormatVector(light.angles))
+            end
+            if light._cone then
+                print("Cone: " .. tostring(light._cone))
+            end
+            if light._inner_cone then
+                print("Inner Cone: " .. tostring(light._inner_cone))
+            end
+        end
+    end
+
+    print("\n=== End of Light Information ===")
 end)
