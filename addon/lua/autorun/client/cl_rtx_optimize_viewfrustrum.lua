@@ -1,147 +1,231 @@
 if not CLIENT then return end
 
 -- ConVars
-local cv_enabled = CreateClientConVar("fr_enabled", "1", true, false, "Enable RTX frustum optimization")
-local cv_static_props = CreateClientConVar("fr_static_props", "1", true, false, "Enable optimization for static props")
+local cv_enabled = CreateClientConVar("fr_enabled", "1", true, false, "Enable large render bounds for all entities")
+local cv_bounds_size = CreateClientConVar("fr_bounds_size", "256", true, false, "Size of render bounds")
+local cv_rtx_updater_distance = CreateClientConVar("fr_rtx_distance", "256", true, false, "Maximum render distance for RTX light updaters")
 
--- Special entities that should always be visible
+-- Cache the bounds vectors
+local boundsSize = cv_bounds_size:GetFloat()
+local mins = Vector(-boundsSize, -boundsSize, -boundsSize)
+local maxs = Vector(boundsSize, boundsSize, boundsSize)
+local DEBOUNCE_TIME = 0.1
+local boundsUpdateTimer = "FR_BoundsUpdate"
+local rtxUpdateTimer = "FR_RTXUpdate"
+local rtxUpdaterCache = {}
+local rtxUpdaterCount = 0
+local BATCH_SIZE = CreateClientConVar("fr_batch_size", "100", true, false, "How many entities to process per frame")
+local processingQueue = {}
+local isProcessing = false
+local progressNotification = nil
+local totalEntitiesToProcess = 0
+
+-- RTX Light Updater model list
+local RTX_UPDATER_MODELS = {
+    ["models/hunter/plates/plate.mdl"] = true,
+    ["models/hunter/blocks/cube025x025x025.mdl"] = true
+}
+
+-- Cache for static props
+local staticProps = {}
+local originalBounds = {} -- Store original render bounds
+
 local SPECIAL_ENTITIES = {
     ["hdri_cube_editor"] = true,
     ["rtx_lightupdater"] = true,
     ["rtx_lightupdatermanager"] = true
 }
 
--- Cache for managed entities
-local managedEntities = {}
-local staticProps = {}
+-- Helper function to identify RTX updaters
+local function IsRTXUpdater(ent)
+    if not IsValid(ent) then return false end
+    local class = ent:GetClass()
+    return SPECIAL_ENTITIES[class] or 
+           (ent:GetModel() and RTX_UPDATER_MODELS[ent:GetModel()])
+end
 
-local function GetLightType(light)
-    -- Base light types
-    if light.style then
-        if light.style ~= "0" then
-            return "Dynamic Light"
+-- Store original bounds for an entity
+local function StoreOriginalBounds(ent)
+    if not IsValid(ent) or originalBounds[ent] then return end
+    local mins, maxs = ent:GetRenderBounds()
+    originalBounds[ent] = {mins = mins, maxs = maxs}
+end
+
+-- Add RTX updater cache management functions
+local function AddToRTXCache(ent)
+    if not IsValid(ent) or rtxUpdaterCache[ent] then return end
+    if IsRTXUpdater(ent) then
+        rtxUpdaterCache[ent] = true
+        rtxUpdaterCount = rtxUpdaterCount + 1
+        
+        -- Set initial RTX bounds
+        local rtxDistance = cv_rtx_updater_distance:GetFloat()
+        local rtxBoundsSize = Vector(rtxDistance, rtxDistance, rtxDistance)
+        ent:SetRenderBounds(-rtxBoundsSize, rtxBoundsSize)
+        ent:DisableMatrix("RenderMultiply")
+        ent:SetNoDraw(false)
+        
+        -- Special handling for hdri_cube_editor to ensure it's never culled
+        if ent:GetClass() == "hdri_cube_editor" then
+            -- Using a very large value for HDRI cube editor
+            local hdriSize = 32768 -- Maximum recommended size
+            local hdriBounds = Vector(hdriSize, hdriSize, hdriSize)
+            ent:SetRenderBounds(-hdriBounds, hdriBounds)
         end
     end
-    
-    if light.classname == "light" then
-        return "Point Light"
-    elseif light.classname == "light_spot" then
-        return "Spot Light"
-    elseif light.classname == "light_environment" then
-        return "Environment Light"
-    elseif light.classname == "light_dynamic" then
-        return "Dynamic Light"
+end
+
+local function RemoveFromRTXCache(ent)
+    if rtxUpdaterCache[ent] then
+        rtxUpdaterCache[ent] = nil
+        rtxUpdaterCount = rtxUpdaterCount - 1
     end
-    
-    return "Unknown Light"
 end
 
-local function FormatVector(vec)
-    return string.format("%.1f %.1f %.1f", vec.x, vec.y, vec.z)
-end
-
--- Helper function to identify RTX-related entities
-local function IsRTXEntity(ent)
-    if not IsValid(ent) then return end
-    return SPECIAL_ENTITIES[ent:GetClass()]
-end
-
--- Set entity visibility state
-local function SetEntityVisibility(ent, enable)
+-- Set bounds for a single entity
+local function SetEntityBounds(ent, useOriginal)
     if not IsValid(ent) then return end
     
-    if enable then
-        -- Basic visibility flags that won't interfere with RTX
-        ent:AddEFlags(EFL_FORCE_CHECK_TRANSMIT)
-        ent:SetRenderMode(RENDERMODE_NORMAL)
-        ent:DrawShadow(true)
+    if useOriginal then
+        if originalBounds[ent] then
+            ent:SetRenderBounds(originalBounds[ent].mins, originalBounds[ent].maxs)
+        end
     else
-        ent:RemoveEFlags(EFL_FORCE_CHECK_TRANSMIT)
+        StoreOriginalBounds(ent)
+        
+        -- Special handling for HDRI cube editor
+        if ent:GetClass() == "hdri_cube_editor" then
+            local hdriSize = 32768 -- Maximum recommended size
+            local hdriBounds = Vector(hdriSize, hdriSize, hdriSize)
+            ent:SetRenderBounds(-hdriBounds, hdriBounds)
+            ent:DisableMatrix("RenderMultiply")
+            ent:SetNoDraw(false)
+        -- Use cache to check for RTX updaters
+        elseif rtxUpdaterCache[ent] then
+            local rtxDistance = cv_rtx_updater_distance:GetFloat()
+            local rtxBoundsSize = Vector(rtxDistance, rtxDistance, rtxDistance)
+            ent:SetRenderBounds(-rtxBoundsSize, rtxBoundsSize)
+            ent:DisableMatrix("RenderMultiply")
+            ent:SetNoDraw(false)
+        else
+            ent:SetRenderBounds(mins, maxs)
+        end
     end
 end
 
--- Handle static props
-local function SetupStaticProps()
+-- Create clientside static props
+local function CreateStaticProps()
     -- Clear existing static props
-    for prop in pairs(staticProps) do
+    for _, prop in pairs(staticProps) do
         if IsValid(prop) then
             prop:Remove()
         end
     end
     staticProps = {}
 
-    -- Only proceed if enabled and NikNaks is available
-    if not cv_enabled:GetBool() or not cv_static_props:GetBool() or not NikNaks or not NikNaks.CurrentMap then return end
-
-    local props = NikNaks.CurrentMap:GetStaticProps()
-    for _, propData in pairs(props) do
-        local prop = ClientsideModel(propData:GetModel())
-        if IsValid(prop) then
-            prop:SetPos(propData:GetPos())
-            prop:SetAngles(propData:GetAngles())
-            prop:SetColor(propData:GetColor())
-            prop:SetModelScale(propData:GetScale())
-            
-            -- Set large render bounds
-            local bounds = Vector(32768, 32768, 32768)
-            prop:SetRenderBounds(-bounds, bounds)
-            
-            staticProps[prop] = true
-            managedEntities[prop] = true
+    if cv_enabled:GetBool() and NikNaks and NikNaks.CurrentMap then
+        local props = NikNaks.CurrentMap:GetStaticProps()
+        for _, propData in pairs(props) do
+            local prop = ClientsideModel(propData:GetModel())
+            if IsValid(prop) then
+                prop:SetPos(propData:GetPos())
+                prop:SetAngles(propData:GetAngles())
+                prop:SetRenderBounds(mins, maxs)
+                prop:SetColor(propData:GetColor())
+                prop:SetModelScale(propData:GetScale())
+                table.insert(staticProps, prop)
+            end
         end
     end
 end
 
+-- Update all entities
+local function UpdateAllEntities(useOriginal)
+    -- Clear any existing processing
+    processingQueue = {}
+    isProcessing = false
+    
+    -- Gather valid entities and process them
+    local entities = ents.GetAll()
+    for _, ent in ipairs(entities) do
+        if IsValid(ent) then
+            SetEntityBounds(ent, useOriginal)
+        end
+    end
+    
+    -- Signal completion
+    hook.Run("FR_FinishedProcessing")
+end
+
+-- Status reporting
+local lastProcessStatus = 0
+hook.Add("HUDPaint", "FR_ProcessingStatus", function()
+    if not isProcessing then return end
+    
+    -- Update status once per second
+    if CurTime() - lastProcessStatus > 1 then
+        lastProcessStatus = CurTime()
+        
+        local progress = math.Round((1 - (#processingQueue / #ents.GetAll())) * 100)
+        notification.AddProgress("FR_Processing", "Updating Render Bounds: " .. progress .. "%", progress / 100)
+    end
+end)
+
 -- Hook for new entities
-hook.Add("OnEntityCreated", "RTX_PVS_Optimization", function(ent)
+hook.Add("OnEntityCreated", "SetLargeRenderBounds", function(ent)
     if not IsValid(ent) then return end
     
     timer.Simple(0, function()
-        if not IsValid(ent) or not cv_enabled:GetBool() then return end
-        
-        if IsRTXEntity(ent) then
-            SetEntityVisibility(ent, true)
-            managedEntities[ent] = true
+        if IsValid(ent) then
+            AddToRTXCache(ent)
+            SetEntityBounds(ent, not cv_enabled:GetBool())
+        end
+    end)
+end)
+-- Initial setup
+hook.Add("InitPostEntity", "InitialBoundsSetup", function()
+    timer.Simple(1, function()
+        if cv_enabled:GetBool() then
+            UpdateAllEntities(false)
+            CreateStaticProps()
         end
     end)
 end)
 
--- Entity cleanup
-hook.Add("EntityRemoved", "RTX_PVS_Cleanup", function(ent)
-    managedEntities[ent] = nil
-    staticProps[ent] = nil
-end)
-
 -- Map cleanup/reload handler
 hook.Add("OnReloaded", "RefreshStaticProps", function()
-    timer.Simple(1, SetupStaticProps)
-end)
-
--- Initial setup
-hook.Add("InitPostEntity", "InitialRTXSetup", function()
-    timer.Simple(1, SetupStaticProps)
-end)
-
--- ConVar change handlers
-cvars.AddChangeCallback("fr_enabled", function(_, _, new)
-    local enabled = tobool(new)
-    for ent in pairs(managedEntities) do
-        if IsValid(ent) then
-            SetEntityVisibility(ent, enabled)
+    -- Clear bounds cache
+    originalBounds = {}
+    
+    -- Remove existing static props
+    for _, prop in pairs(staticProps) do
+        if IsValid(prop) then
+            prop:Remove()
         end
     end
+    staticProps = {}
     
-    if enabled and cv_static_props:GetBool() then
-        SetupStaticProps()
+    -- Recreate if enabled
+    if cv_enabled:GetBool() then
+        timer.Simple(1, CreateStaticProps)
     end
 end)
 
-cvars.AddChangeCallback("fr_static_props", function(_, _, new)
+-- Handle ConVar changes
+cvars.AddChangeCallback("fr_enabled", function(_, _, new)
     local enabled = tobool(new)
-    if enabled and cv_enabled:GetBool() then
-        SetupStaticProps()
+    
+    if enabled then
+        UpdateAllEntities(false)
+        -- Delay static prop creation until entity processing is done
+        hook.Add("FR_FinishedProcessing", "FR_CreateStaticProps", function()
+            CreateStaticProps()
+            hook.Remove("FR_FinishedProcessing", "FR_CreateStaticProps")
+        end)
     else
-        for prop in pairs(staticProps) do
+        UpdateAllEntities(true)
+        -- Remove static props
+        for _, prop in pairs(staticProps) do
             if IsValid(prop) then
                 prop:Remove()
             end
@@ -150,62 +234,185 @@ cvars.AddChangeCallback("fr_static_props", function(_, _, new)
     end
 end)
 
--- Refresh command
-concommand.Add("fr_refresh", function()
-    if cv_enabled:GetBool() then
-        for ent in pairs(managedEntities) do
-            if IsValid(ent) then
-                SetEntityVisibility(ent, true)
-            end
-        end
-        if cv_static_props:GetBool() then
-            SetupStaticProps()
-        end
-        print("Refreshed RTX optimization")
+cvars.AddChangeCallback("fr_bounds_size", function(_, _, new)
+    -- Cancel any pending updates
+    if timer.Exists(boundsUpdateTimer) then
+        timer.Remove(boundsUpdateTimer)
     end
+    
+    -- Schedule the update
+    timer.Create(boundsUpdateTimer, DEBOUNCE_TIME, 1, function()
+        boundsSize = tonumber(new)
+        mins = Vector(-boundsSize, -boundsSize, -boundsSize)
+        maxs = Vector(boundsSize, boundsSize, boundsSize)
+        
+        if cv_enabled:GetBool() then
+            UpdateAllEntities(false)
+            CreateStaticProps()
+        end
+    end)
 end)
 
--- Settings panel
-hook.Add("PopulateToolMenu", "RTXOptimizationMenu", function()
-    spawnmenu.AddToolMenuOption("Utilities", "User", "RTX_OPT", "#RTX Optimization", "", "", function(panel)
-        panel:ClearControls()
+
+cvars.AddChangeCallback("fr_rtx_distance", function(_, _, new)
+    if not cv_enabled:GetBool() then return end
+    
+    if timer.Exists(rtxUpdateTimer) then
+        timer.Remove(rtxUpdateTimer)
+    end
+    
+    timer.Create(rtxUpdateTimer, DEBOUNCE_TIME, 1, function()
+        local rtxDistance = tonumber(new)
+        local rtxBoundsSize = Vector(rtxDistance, rtxDistance, rtxDistance)
         
-        panel:CheckBox("Enable RTX Optimization", "fr_enabled")
-        panel:ControlHelp("Optimize entity visibility for RTX")
-        
-        panel:Help("")
-        
-        panel:CheckBox("Enable Static Props Optimization", "fr_static_props")
-        panel:ControlHelp("Apply optimization to map's static props")
-        
-        panel:Help("")
-        
-        local refreshBtn = panel:Button("Refresh")
-        function refreshBtn.DoClick()
-            RunConsoleCommand("fr_refresh")
-            surface.PlaySound("buttons/button14.wav")
-        end
-        
-        local debugBtn = panel:Button("Debug Info")
-        function debugBtn.DoClick()
-            local rtxCount = 0
-            local propCount = 0
-            
-            for ent in pairs(managedEntities) do
-                if IsValid(ent) then
-                    if staticProps[ent] then
-                        propCount = propCount + 1
-                    else
-                        rtxCount = rtxCount + 1
-                    end
-                end
+        -- Use cache instead of iterating all entities
+        for ent in pairs(rtxUpdaterCache) do
+            if IsValid(ent) then
+                ent:SetRenderBounds(-rtxBoundsSize, rtxBoundsSize)
+            else
+                RemoveFromRTXCache(ent)
             end
-            
-            print("\nRTX Optimization Status:")
-            print("Enabled:", cv_enabled:GetBool())
-            print("Static Props Enabled:", cv_static_props:GetBool())
-            print("RTX Entities:", rtxCount)
-            print("Static Props:", propCount)
         end
+    end)
+end)
+
+-- ConCommand to refresh all entities' bounds
+concommand.Add("fr_refresh", function()
+    -- Clear bounds cache
+    originalBounds = {}
+    
+    if cv_enabled:GetBool() then
+        boundsSize = cv_bounds_size:GetFloat()
+        mins = Vector(-boundsSize, -boundsSize, -boundsSize)
+        maxs = Vector(boundsSize, boundsSize, boundsSize)
+        
+        UpdateAllEntities(false)
+        CreateStaticProps()
+    else
+        UpdateAllEntities(true)
+    end
+    
+    print("Refreshed render bounds for all entities" .. (cv_enabled:GetBool() and " with large bounds" or " with original bounds"))
+end)
+
+-- Entity cleanup
+hook.Add("EntityRemoved", "CleanupRTXCache", function(ent)
+    RemoveFromRTXCache(ent)
+    originalBounds[ent] = nil
+end)
+
+local debugInfo = {
+    totalProcessed = 0,
+    lastBatchTime = 0,
+    averageBatchTime = 0
+}
+
+-- Debug command
+concommand.Add("fr_debug", function()
+    print("\nRTX Frustum Optimization Debug:")
+    print("Enabled:", cv_enabled:GetBool())
+    print("Batch Size:", BATCH_SIZE:GetInt())
+    print("Currently Processing:", isProcessing)
+    print("Queued Entities:", #processingQueue)
+    print("Total Processed:", debugInfo.totalProcessed)
+    print("Average Batch Time:", string.format("%.3f ms", debugInfo.averageBatchTime * 1000))
+    print("Static Props Count:", #staticProps)
+    print("Stored Original Bounds:", table.Count(originalBounds))
+    print("RTX Updaters (Cached):", rtxUpdaterCount)
+end)
+
+local function CreateSettingsPanel(panel)
+    -- Clear the panel first
+    panel:ClearControls()
+    
+    -- Create a scroll panel to contain everything
+    local scrollPanel = vgui.Create("DScrollPanel", panel)
+    scrollPanel:Dock(FILL)
+    scrollPanel:DockMargin(0, 0, 0, 0)
+    
+    -- Enable/Disable Toggle
+    panel:CheckBox("Enable RTX View Frustrum", "fr_enabled")
+    
+    -- Add some spacing
+    panel:Help("")
+    
+    -- Bounds Size Slider
+    local boundsSlider = panel:NumSlider("Render Bounds Size", "fr_bounds_size", 256, 32000, 0)
+    boundsSlider:SetTooltip("Size of render bounds for regular entities")
+    
+    -- Add some spacing
+    panel:Help("")
+    
+    -- RTX Updater Distance Slider
+    local rtxDistanceSlider = panel:NumSlider("RTX Updater Distance", "fr_rtx_distance", 256, 32000, 0)
+    rtxDistanceSlider:SetTooltip("Maximum render distance for RTX light updaters")
+    
+    -- Add some spacing
+    panel:Help("")
+    
+    -- Refresh Button
+    local refreshBtn = panel:Button("Refresh All Bounds")
+    function refreshBtn.DoClick()
+        RunConsoleCommand("fr_refresh")
+        surface.PlaySound("buttons/button14.wav")
+    end
+    
+    -- Debug Button
+    local debugBtn = panel:Button("Print Debug Info")
+    function debugBtn.DoClick()
+        RunConsoleCommand("fr_debug")
+        surface.PlaySound("buttons/button14.wav")
+    end
+    
+    -- Add more spacing before status
+    panel:Help("")
+    panel:Help("")
+    
+    -- Status Label Container
+    local statusContainer = vgui.Create("DPanel", panel)
+    statusContainer:Dock(BOTTOM)
+    statusContainer:SetTall(80) -- Adjust height as needed
+    statusContainer:DockMargin(0, 5, 0, 0)
+    statusContainer.Paint = function(self, w, h)
+        surface.SetDrawColor(0, 0, 0, 50)
+        surface.DrawRect(0, 0, w, h)
+    end
+    
+    -- Status Label
+    local status = vgui.Create("DLabel", statusContainer)
+    status:Dock(FILL)
+    status:DockMargin(5, 5, 5, 5)
+    status:SetText("Status Information:")
+    status:SetWrap(true)
+    
+    -- Update status periodically
+    function status:Think()
+        if self.NextUpdate and self.NextUpdate > CurTime() then return end
+        self.NextUpdate = CurTime() + 1
+        
+        local rtxCount = 0
+        for _, ent in ipairs(ents.GetAll()) do
+            if IsValid(ent) and IsRTXUpdater(ent) then
+                rtxCount = rtxCount + 1
+            end
+        end
+        
+        local statusText = string.format(
+            "Status Information:\n\n" ..
+            "Static Props: %d\n" ..
+            "RTX Updaters: %d\n" ..
+            "Stored Bounds: %d",
+            #staticProps,
+            rtxCount,
+            table.Count(originalBounds)
+        )
+        self:SetText(statusText)
+    end
+end
+
+-- Add to Utilities menu
+hook.Add("PopulateToolMenu", "RTXFrustumOptimizationMenu", function()
+    spawnmenu.AddToolMenuOption("Utilities", "User", "RTX_OVF", "#RTX View Frustum", "", "", function(panel)
+        CreateSettingsPanel(panel)
     end)
 end)
