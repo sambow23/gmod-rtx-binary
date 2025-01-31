@@ -906,3 +906,5 @@ lithium-main/lua/lithium/extensions/client/optimised_draw.lua
 lithium-main/lua/lithium/extensions/client/render.lua
 lithium-main/lua/lithium/tests/hook.lua
 lithium-main/lua/lithium/util/client.lua
+source/launcher/build*
+source/launcher/vcpkg*
