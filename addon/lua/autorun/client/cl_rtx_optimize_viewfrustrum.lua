@@ -40,7 +40,6 @@ local LIGHT_TYPES = {
     ENVIRONMENT = "light_environment"
 }
 
--- Separate regular lights from environment lights
 local REGULAR_LIGHT_TYPES = {
     [LIGHT_TYPES.POINT] = true,
     [LIGHT_TYPES.SPOT] = true,
@@ -375,51 +374,6 @@ local function CreateSettingsPanel(panel)
     function debugBtn.DoClick()
         RunConsoleCommand("fr_debug")
         surface.PlaySound("buttons/button14.wav")
-    end
-    
-    -- Add more spacing before status
-    panel:Help("")
-    panel:Help("")
-    
-    -- Status Label Container
-    local statusContainer = vgui.Create("DPanel", panel)
-    statusContainer:Dock(BOTTOM)
-    statusContainer:SetTall(80) -- Adjust height as needed
-    statusContainer:DockMargin(0, 5, 0, 0)
-    statusContainer.Paint = function(self, w, h)
-        surface.SetDrawColor(0, 0, 0, 50)
-        surface.DrawRect(0, 0, w, h)
-    end
-    
-    -- Status Label
-    local status = vgui.Create("DLabel", statusContainer)
-    status:Dock(FILL)
-    status:DockMargin(5, 5, 5, 5)
-    status:SetText("Status Information:")
-    status:SetWrap(true)
-    
-    -- Update status periodically
-    function status:Think()
-        if self.NextUpdate and self.NextUpdate > CurTime() then return end
-        self.NextUpdate = CurTime() + 1
-        
-        local rtxCount = 0
-        for _, ent in ipairs(ents.GetAll()) do
-            if IsValid(ent) and IsRTXUpdater(ent) then
-                rtxCount = rtxCount + 1
-            end
-        end
-        
-        local statusText = string.format(
-            "Status Information:\n\n" ..
-            "Static Props: %d\n" ..
-            "RTX Updaters: %d\n" ..
-            "Stored Bounds: %d",
-            #staticProps,
-            rtxCount,
-            table.Count(originalBounds)
-        )
-        self:SetText(statusText)
     end
 end
 
