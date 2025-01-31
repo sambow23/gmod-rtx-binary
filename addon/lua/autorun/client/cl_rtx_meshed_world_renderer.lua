@@ -28,6 +28,10 @@ local table_insert = table.insert
 local MAX_VERTICES = 10000
 local MAX_CHUNK_VERTS = 32768
 
+-- Random texture for displacements so we can use it as a shadow mask in RTX Remix
+local DISPLACEMENT_MATERIAL = Material("dev/reflectivity_30")
+local DISPLACEMENT_OFFSET = 1 -- Adjust this value to change how far "under" they are
+
 -- Pre-allocate common vectors and tables for reuse
 local vertexBuffer = {
     positions = {},
@@ -220,7 +224,6 @@ local function BuildMapMeshes()
     
         for _, face in pairs(leafFaces) do
             if not face or 
-               face:IsDisplacement() or -- Skip displacements early
                IsBrushEntity(face) or
                not face:ShouldRender() or 
                IsSkyboxFace(face) then 
@@ -245,7 +248,8 @@ local function BuildMapMeshes()
             local chunkZ = math_floor(center.z / chunkSize)
             local chunkKey = GetChunkKey(chunkX, chunkY, chunkZ)
             
-            local material = face:GetMaterial()
+            -- Use dev texture for displacements, original material for everything else
+            local material = face:IsDisplacement() and DISPLACEMENT_MATERIAL or face:GetMaterial()
             if not material then continue end
             
             local matName = material:GetName()
@@ -285,6 +289,14 @@ local function BuildMapMeshes()
                     if not ValidateVertex(vert.pos) then
                         faceValid = false
                         break
+                    end
+                    
+                    -- If this is a displacement face, offset the vertices slightly down
+                    if face:IsDisplacement() then
+                        -- Calculate how much to offset based on face angle
+                        local upDot = math.abs(vert.normal:Dot(Vector(0,0,1)))
+                        local offset = DISPLACEMENT_OFFSET * (1 + upDot) -- More offset for flatter surfaces
+                        vert.pos = vert.pos - (vert.normal * offset)
                     end
                     
                     -- Update bounds
