@@ -5,6 +5,7 @@ local cv_enabled = CreateClientConVar("fr_enabled", "1", true, false, "Enable la
 local cv_bounds_size = CreateClientConVar("fr_bounds_size", "4096", true, false, "Size of render bounds")
 local cv_rtx_updater_distance = CreateClientConVar("fr_rtx_distance", "2048", true, false, "Maximum render distance for regular RTX light updaters")
 local cv_environment_light_distance = CreateClientConVar("fr_environment_light_distance", "32768", true, false, "Maximum render distance for environment light updaters")
+local cv_batch_size = CreateClientConVar("fr_batch_size", "100", true, false, "Number of entities to update per frame")
 
 
 -- Cache the bounds vectors
@@ -16,6 +17,9 @@ local boundsUpdateTimer = "FR_BoundsUpdate"
 local rtxUpdateTimer = "FR_RTXUpdate"
 local rtxUpdaterCache = {}
 local rtxUpdaterCount = 0
+local UPDATE_BATCH_SIZE = 100 
+local updateQueue = {}
+local isProcessingQueue = false
 
 -- RTX Light Updater model list
 local RTX_UPDATER_MODELS = {
@@ -46,6 +50,33 @@ local REGULAR_LIGHT_TYPES = {
     [LIGHT_TYPES.SPOT] = true,
     [LIGHT_TYPES.DYNAMIC] = true
 }
+
+-- Add this function to handle batched updates
+local function ProcessUpdateQueue()
+    if #updateQueue == 0 then
+        isProcessingQueue = false
+        return
+    end
+
+    local processCount = 0
+    local i = 1
+    
+    while i <= #updateQueue and processCount < UPDATE_BATCH_SIZE do
+        local ent = updateQueue[i]
+        if IsValid(ent) then
+            SetEntityBounds(ent, not cv_enabled:GetBool())
+            processCount = processCount + 1
+        end
+        table.remove(updateQueue, i)
+    end
+
+    if #updateQueue > 0 then
+        -- Schedule next batch for next frame
+        timer.Simple(0, ProcessUpdateQueue)
+    else
+        isProcessingQueue = false
+    end
+end
 
 -- Helper function to identify RTX updaters
 local function IsRTXUpdater(ent)
@@ -164,8 +195,18 @@ end
 
 -- Update all entities
 local function UpdateAllEntities(useOriginal)
+    -- Clear existing queue and processing
+    updateQueue = {}
+    
+    -- Queue all entities for update
     for _, ent in ipairs(ents.GetAll()) do
-        SetEntityBounds(ent, useOriginal)
+        table.insert(updateQueue, ent)
+    end
+
+    -- Start processing if not already running
+    if not isProcessingQueue then
+        isProcessingQueue = true
+        ProcessUpdateQueue()
     end
 end
 
@@ -176,10 +217,16 @@ hook.Add("OnEntityCreated", "SetLargeRenderBounds", function(ent)
     timer.Simple(0, function()
         if IsValid(ent) then
             AddToRTXCache(ent)
-            SetEntityBounds(ent, not cv_enabled:GetBool())
+            table.insert(updateQueue, ent)
+            
+            if not isProcessingQueue then
+                isProcessingQueue = true
+                ProcessUpdateQueue()
+            end
         end
     end)
 end)
+
 -- Initial setup
 hook.Add("InitPostEntity", "InitialBoundsSetup", function()
     timer.Simple(1, function()
@@ -228,6 +275,10 @@ cvars.AddChangeCallback("fr_enabled", function(_, _, new)
     end
 end)
 
+cvars.AddChangeCallback("fr_batch_size", function(_, _, new)
+    UPDATE_BATCH_SIZE = math.Clamp(tonumber(new) or 100, 1, 1000)
+end)
+
 cvars.AddChangeCallback("fr_bounds_size", function(_, _, new)
     -- Cancel any pending updates
     if timer.Exists(boundsUpdateTimer) then
@@ -259,16 +310,17 @@ cvars.AddChangeCallback("fr_rtx_distance", function(_, _, new)
         local rtxDistance = tonumber(new)
         local rtxBoundsSize = Vector(rtxDistance, rtxDistance, rtxDistance)
         
-        -- Only update non-environment light updaters
+        -- Queue RTX updaters for update
+        updateQueue = {}
         for ent in pairs(rtxUpdaterCache) do
-            if IsValid(ent) then
-                -- Explicitly skip environment lights
-                if ent.lightType ~= "light_environment" then
-                    ent:SetRenderBounds(-rtxBoundsSize, rtxBoundsSize)
-                end
-            else
-                RemoveFromRTXCache(ent)
+            if IsValid(ent) and REGULAR_LIGHT_TYPES[ent.lightType] then
+                table.insert(updateQueue, ent)
             end
+        end
+
+        if not isProcessingQueue and #updateQueue > 0 then
+            isProcessingQueue = true
+            ProcessUpdateQueue()
         end
     end)
 end)
@@ -285,15 +337,17 @@ cvars.AddChangeCallback("fr_environment_light_distance", function(_, _, new)
         local envDistance = tonumber(new)
         local envBoundsSize = Vector(envDistance, envDistance, envDistance)
         
-        -- Only update environment light updaters
+        -- Queue environment lights for update
+        updateQueue = {}
         for ent in pairs(rtxUpdaterCache) do
-            if IsValid(ent) and ent.lightType == "light_environment" then
-                ent:SetRenderBounds(-envBoundsSize, envBoundsSize)
-                
-                if cv_enabled:GetBool() then
-                    print(string.format("[RTX Fixes] Updating environment light bounds to %d", envDistance))
-                end
+            if IsValid(ent) and ent.lightType == LIGHT_TYPES.ENVIRONMENT then
+                table.insert(updateQueue, ent)
             end
+        end
+
+        if not isProcessingQueue and #updateQueue > 0 then
+            isProcessingQueue = true
+            ProcessUpdateQueue()
         end
     end)
 end)
