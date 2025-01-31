@@ -5,32 +5,17 @@ local cv_enabled = CreateClientConVar("fr_enabled", "1", true, false, "Enable la
 local cv_bounds_size = CreateClientConVar("fr_bounds_size", "4096", true, false, "Size of render bounds")
 local cv_rtx_updater_distance = CreateClientConVar("fr_rtx_distance", "2048", true, false, "Maximum render distance for regular RTX light updaters")
 local cv_environment_light_distance = CreateClientConVar("fr_environment_light_distance", "32768", true, false, "Maximum render distance for environment light updaters")
-local cv_batch_size = CreateClientConVar("fr_batch_size", "100", true, false, "Number of entities to update per frame")
 
 
 -- Cache the bounds vectors
 local boundsSize = cv_bounds_size:GetFloat()
 local mins = Vector(-boundsSize, -boundsSize, -boundsSize)
 local maxs = Vector(boundsSize, boundsSize, boundsSize)
-local DEBOUNCE_TIME = 2
+local DEBOUNCE_TIME = 0.1
 local boundsUpdateTimer = "FR_BoundsUpdate"
 local rtxUpdateTimer = "FR_RTXUpdate"
 local rtxUpdaterCache = {}
 local rtxUpdaterCount = 0
-local UPDATE_BATCH_SIZE = 50 -- Reduced default batch size
-local MAX_QUEUED_UPDATES = 100 -- Safety limit for queue size
-local MIN_FRAME_TIME = 0.016 -- Target ~60fps (adjust if needed)
-local updateQueue = {}
-local isProcessingQueue = false
-local lastFrameTime = 0
-local frameSkip = 0
-local MAX_FRAME_SKIP = 3
-
-local VALID_RTX_CLASSES = {
-    hdri_cube_editor = true,
-    rtx_lightupdater = true,
-    rtx_lightupdatermanager = true
-}
 
 -- RTX Light Updater model list
 local RTX_UPDATER_MODELS = {
@@ -40,7 +25,7 @@ local RTX_UPDATER_MODELS = {
 
 -- Cache for static props
 local staticProps = {}
-local originalBounds = {}
+local originalBounds = {} -- Store original render bounds
 
 local SPECIAL_ENTITIES = {
     ["hdri_cube_editor"] = true,
@@ -55,6 +40,7 @@ local LIGHT_TYPES = {
     ENVIRONMENT = "light_environment"
 }
 
+-- Separate regular lights from environment lights
 local REGULAR_LIGHT_TYPES = {
     [LIGHT_TYPES.POINT] = true,
     [LIGHT_TYPES.SPOT] = true,
@@ -65,9 +51,8 @@ local REGULAR_LIGHT_TYPES = {
 local function IsRTXUpdater(ent)
     if not IsValid(ent) then return false end
     local class = ent:GetClass()
-    if VALID_RTX_CLASSES[class] then return true end
-    local model = ent:GetModel()
-    return model and RTX_UPDATER_MODELS[model]
+    return SPECIAL_ENTITIES[class] or 
+           (ent:GetModel() and RTX_UPDATER_MODELS[ent:GetModel()])
 end
 
 -- Store original bounds for an entity
@@ -151,76 +136,6 @@ local function SetEntityBounds(ent, useOriginal)
     end
 end
 
-local function SafeQueueUpdate(ent)
-    if #updateQueue >= MAX_QUEUED_UPDATES then
-        print("[RTX Fixes] Warning: Update queue full, skipping updates")
-        return false
-    end
-    table.insert(updateQueue, ent)
-    return true
-end
-
-local function ProcessUpdateQueue()
-    if #updateQueue == 0 then
-        isProcessingQueue = false
-        return
-    end
-
-    -- Skip frames if we're struggling
-    if frameSkip > 0 then
-        frameSkip = frameSkip - 1
-        timer.Simple(engine.TickInterval(), ProcessUpdateQueue)
-        return
-    end
-
-    local currentTime = SysTime()
-    local deltaTime = currentTime - lastFrameTime
-
-    -- If frame time is too high, skip some frames
-    if deltaTime > MIN_FRAME_TIME * 2 then
-        frameSkip = MAX_FRAME_SKIP
-        timer.Simple(engine.TickInterval(), ProcessUpdateQueue)
-        return
-    end
-
-    local processCount = 0
-    local i = 1
-    local removeIndices = {}
-    
-    -- Process batch
-    while i <= #updateQueue and processCount < UPDATE_BATCH_SIZE do
-        local ent = updateQueue[i]
-        if IsValid(ent) then
-            -- Safety check before updating bounds
-            if not ent:IsWorld() and not ent:IsWeapon() then
-                xpcall(function()
-                    SetEntityBounds(ent, not cv_enabled:GetBool())
-                end, function(err)
-                    print("[RTX Fixes] Error updating bounds: ", err)
-                end)
-            end
-            processCount = processCount + 1
-        end
-        table.insert(removeIndices, i)
-        i = i + 1
-    end
-
-    -- Remove processed entities (in reverse to maintain indices)
-    for i = #removeIndices, 1, -1 do
-        table.remove(updateQueue, removeIndices[i])
-    end
-
-    lastFrameTime = SysTime()
-
-    if #updateQueue > 0 then
-        -- Schedule next batch with dynamic delay based on queue size
-        local delay = math.max(0, MIN_FRAME_TIME - deltaTime)
-        timer.Simple(delay, ProcessUpdateQueue)
-    else
-        isProcessingQueue = false
-    end
-end
-
 -- Create clientside static props
 local function CreateStaticProps()
     -- Clear existing static props
@@ -249,36 +164,9 @@ end
 
 -- Update all entities
 local function UpdateAllEntities(useOriginal)
-    -- Clear existing queue
-    updateQueue = {}
-    local entities = ents.GetAll()
-    
-    -- Process in chunks
-    local chunkSize = 1000
-    local currentChunk = 1
-    
-    local function QueueNextChunk()
-        local startIdx = (currentChunk - 1) * chunkSize + 1
-        local endIdx = math.min(startIdx + chunkSize - 1, #entities)
-        
-        for i = startIdx, endIdx do
-            local ent = entities[i]
-            if IsValid(ent) and not ent:IsWorld() then
-                SafeQueueUpdate(ent)
-            end
-        end
-        
-        currentChunk = currentChunk + 1
-        
-        if endIdx < #entities then
-            timer.Simple(0.1, QueueNextChunk)
-        elseif not isProcessingQueue then
-            isProcessingQueue = true
-            ProcessUpdateQueue()
-        end
+    for _, ent in ipairs(ents.GetAll()) do
+        SetEntityBounds(ent, useOriginal)
     end
-    
-    QueueNextChunk()
 end
 
 -- Hook for new entities
@@ -288,16 +176,10 @@ hook.Add("OnEntityCreated", "SetLargeRenderBounds", function(ent)
     timer.Simple(0, function()
         if IsValid(ent) then
             AddToRTXCache(ent)
-            table.insert(updateQueue, ent)
-            
-            if not isProcessingQueue then
-                isProcessingQueue = true
-                ProcessUpdateQueue()
-            end
+            SetEntityBounds(ent, not cv_enabled:GetBool())
         end
     end)
 end)
-
 -- Initial setup
 hook.Add("InitPostEntity", "InitialBoundsSetup", function()
     timer.Simple(1, function()
@@ -346,10 +228,6 @@ cvars.AddChangeCallback("fr_enabled", function(_, _, new)
     end
 end)
 
-cvars.AddChangeCallback("fr_batch_size", function(_, _, new)
-    UPDATE_BATCH_SIZE = math.Clamp(tonumber(new) or 100, 1, 1000)
-end)
-
 cvars.AddChangeCallback("fr_bounds_size", function(_, _, new)
     -- Cancel any pending updates
     if timer.Exists(boundsUpdateTimer) then
@@ -381,18 +259,16 @@ cvars.AddChangeCallback("fr_rtx_distance", function(_, _, new)
         local rtxDistance = tonumber(new)
         local rtxBoundsSize = Vector(rtxDistance, rtxDistance, rtxDistance)
         
-        -- Clear queue before adding new updates
-        updateQueue = {}
-        
+        -- Only update non-environment light updaters
         for ent in pairs(rtxUpdaterCache) do
-            if IsValid(ent) and REGULAR_LIGHT_TYPES[ent.lightType] then
-                SafeQueueUpdate(ent)
+            if IsValid(ent) then
+                -- Explicitly skip environment lights
+                if ent.lightType ~= "light_environment" then
+                    ent:SetRenderBounds(-rtxBoundsSize, rtxBoundsSize)
+                end
+            else
+                RemoveFromRTXCache(ent)
             end
-        end
-
-        if not isProcessingQueue and #updateQueue > 0 then
-            isProcessingQueue = true
-            ProcessUpdateQueue()
         end
     end)
 end)
@@ -409,26 +285,17 @@ cvars.AddChangeCallback("fr_environment_light_distance", function(_, _, new)
         local envDistance = tonumber(new)
         local envBoundsSize = Vector(envDistance, envDistance, envDistance)
         
-        -- Queue environment lights for update
-        updateQueue = {}
+        -- Only update environment light updaters
         for ent in pairs(rtxUpdaterCache) do
-            if IsValid(ent) and ent.lightType == LIGHT_TYPES.ENVIRONMENT then
-                table.insert(updateQueue, ent)
+            if IsValid(ent) and ent.lightType == "light_environment" then
+                ent:SetRenderBounds(-envBoundsSize, envBoundsSize)
+                
+                if cv_enabled:GetBool() then
+                    print(string.format("[RTX Fixes] Updating environment light bounds to %d", envDistance))
+                end
             end
         end
-
-        if not isProcessingQueue and #updateQueue > 0 then
-            isProcessingQueue = true
-            ProcessUpdateQueue()
-        end
     end)
-end)
-
--- Emergency controls
-concommand.Add("fr_emergency_stop", function()
-    updateQueue = {}
-    isProcessingQueue = false
-    print("[RTX Fixes] Emergency stop - cleared update queue")
 end)
 
 -- ConCommand to refresh all entities' bounds
@@ -508,6 +375,51 @@ local function CreateSettingsPanel(panel)
     function debugBtn.DoClick()
         RunConsoleCommand("fr_debug")
         surface.PlaySound("buttons/button14.wav")
+    end
+    
+    -- Add more spacing before status
+    panel:Help("")
+    panel:Help("")
+    
+    -- Status Label Container
+    local statusContainer = vgui.Create("DPanel", panel)
+    statusContainer:Dock(BOTTOM)
+    statusContainer:SetTall(80) -- Adjust height as needed
+    statusContainer:DockMargin(0, 5, 0, 0)
+    statusContainer.Paint = function(self, w, h)
+        surface.SetDrawColor(0, 0, 0, 50)
+        surface.DrawRect(0, 0, w, h)
+    end
+    
+    -- Status Label
+    local status = vgui.Create("DLabel", statusContainer)
+    status:Dock(FILL)
+    status:DockMargin(5, 5, 5, 5)
+    status:SetText("Status Information:")
+    status:SetWrap(true)
+    
+    -- Update status periodically
+    function status:Think()
+        if self.NextUpdate and self.NextUpdate > CurTime() then return end
+        self.NextUpdate = CurTime() + 1
+        
+        local rtxCount = 0
+        for _, ent in ipairs(ents.GetAll()) do
+            if IsValid(ent) and IsRTXUpdater(ent) then
+                rtxCount = rtxCount + 1
+            end
+        end
+        
+        local statusText = string.format(
+            "Status Information:\n\n" ..
+            "Static Props: %d\n" ..
+            "RTX Updaters: %d\n" ..
+            "Stored Bounds: %d",
+            #staticProps,
+            rtxCount,
+            table.Count(originalBounds)
+        )
+        self:SetText(statusText)
     end
 end
 
