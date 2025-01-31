@@ -29,7 +29,7 @@ local RTX_UPDATER_MODELS = {
 
 -- Cache for static props
 local staticProps = {}
-local originalBounds = {} -- Store original render bounds
+local originalBounds = {}
 
 local SPECIAL_ENTITIES = {
     ["hdri_cube_editor"] = true,
@@ -44,14 +44,12 @@ local LIGHT_TYPES = {
     ENVIRONMENT = "light_environment"
 }
 
--- Separate regular lights from environment lights
 local REGULAR_LIGHT_TYPES = {
     [LIGHT_TYPES.POINT] = true,
     [LIGHT_TYPES.SPOT] = true,
     [LIGHT_TYPES.DYNAMIC] = true
 }
 
--- Add this function to handle batched updates
 local function ProcessUpdateQueue()
     if #updateQueue == 0 then
         isProcessingQueue = false
