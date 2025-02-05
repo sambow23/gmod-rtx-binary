@@ -24,18 +24,86 @@ end
 
 -- Shared mesh handling
 function RTX.Shared.CreateMesh(vertices, material)
-    local newMesh = Mesh(material)
+    if #vertices == 0 then return nil end
     
+    local newMesh = Mesh(material)
     mesh.Begin(newMesh, MATERIAL_TRIANGLES, #vertices)
-    for _, vert in ipairs(vertices) do
-        mesh.Position(vert.pos)
-        mesh.Normal(vert.normal)
-        mesh.TexCoord(0, vert.u or 0, vert.v or 0)
+    
+    -- Process triangles
+    for i = 1, #vertices, 3 do
+        local v1, v2, v3 = vertices[i], vertices[i + 1], vertices[i + 2]
+        if not (v1 and v2 and v3) then continue end
+        
+        -- Calculate face normal if not provided
+        if not v1.normal or not v2.normal or not v3.normal then
+            local normal = (v2.pos - v1.pos):Cross(v3.pos - v1.pos):GetNormalized()
+            v1.normal = normal
+            v2.normal = normal
+            v3.normal = normal
+        end
+        
+        -- First vertex
+        mesh.Position(v1.pos)
+        mesh.Normal(v1.normal)
+        mesh.TexCoord(0, v1.u or 0, v1.v or 0)
+        mesh.AdvanceVertex()
+        
+        -- Second vertex
+        mesh.Position(v2.pos)
+        mesh.Normal(v2.normal)
+        mesh.TexCoord(0, v2.u or 0, v2.v or 0)
+        mesh.AdvanceVertex()
+        
+        -- Third vertex
+        mesh.Position(v3.pos)
+        mesh.Normal(v3.normal)
+        mesh.TexCoord(0, v3.u or 0, v3.v or 0)
         mesh.AdvanceVertex()
     end
-    mesh.End()
     
+    mesh.End()
     return newMesh
+end
+
+function RTX.Shared.GenerateVertexData(modelMeshes)
+    local vertices = {}
+    
+    for _, meshData in ipairs(modelMeshes) do
+        -- Get base vertex data
+        local verts = meshData.verticies
+        if not verts or #verts == 0 then continue end
+        
+        -- Process triangles
+        for i = 1, #verts, 3 do
+            local v1, v2, v3 = verts[i], verts[i + 1], verts[i + 2]
+            if not (v1 and v2 and v3) then continue end
+            
+            -- Calculate face normal
+            local normal = (v2.pos - v1.pos):Cross(v3.pos - v1.pos):GetNormalized()
+            
+            -- Store vertices with corrected normals
+            table.insert(vertices, {
+                pos = v1.pos,
+                normal = normal,
+                u = v1.u,
+                v = v1.v
+            })
+            table.insert(vertices, {
+                pos = v2.pos,
+                normal = normal,
+                u = v2.u,
+                v = v2.v
+            })
+            table.insert(vertices, {
+                pos = v3.pos,
+                normal = normal,
+                u = v3.u,
+                v = v3.v
+            })
+        end
+    end
+    
+    return vertices
 end
 
 function RTX.Shared.DetermineOptimalChunkSize(totalFaces)

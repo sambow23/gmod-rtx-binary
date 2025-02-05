@@ -2,6 +2,9 @@
 if not CLIENT then return end
 require("niknaks")
 
+-- Constants
+local MAX_VERTICES = 10000 -- Maximum vertices per mesh batch
+
 -- Cache and state management
 local isEnabled = false
 local propCache = {
@@ -38,27 +41,27 @@ local function BuildPropCache()
             local meshes = util.GetModelMeshes(modelPath)
             if meshes then
                 propCache.meshes[modelPath] = {}
-                for _, meshData in ipairs(meshes) do
-                    if not meshData.verticies or #meshData.verticies == 0 then continue end
-                    
-                    -- Cache material
-                    local materialPath = meshData.material
+                
+                -- Generate proper vertex data
+                local vertices = RTX.Shared.GenerateVertexData(meshes)
+                if #vertices > 0 then
+                    -- Create mesh batches
+                    local materialPath = meshes[1].material -- Assuming same material for all vertices
                     if not propCache.materials[materialPath] then
                         propCache.materials[materialPath] = Material(materialPath)
                     end
                     
-                    -- Create and store mesh
-                    local propMesh = RTX.Shared.CreateMesh(meshData.verticies, propCache.materials[materialPath])
-                    
-                    table.insert(propCache.meshes[modelPath], {
-                        mesh = propMesh,
-                        material = materialPath
-                    })
+                    local meshBatches = RTX.Shared.CreateMeshBatch(vertices, propCache.materials[materialPath], MAX_VERTICES)
+                    if meshBatches then
+                        propCache.meshes[modelPath] = {
+                            meshes = meshBatches,
+                            material = materialPath
+                        }
+                    end
                 end
             end
         end
     end
-    
     print(string.format("[RTX Props] Built prop cache in %.2f seconds", SysTime() - startTime))
 end
 
@@ -68,24 +71,30 @@ local function RenderProp(prop)
     local meshGroup = propCache.meshes[modelPath]
     if not meshGroup then return end
     
-    -- Setup transform matrix
-    local matrix = Matrix()
-    matrix:SetTranslation(prop:GetPos())
-    matrix:SetAngles(prop:GetAngles())
+    local pos = prop:GetPos()
+    local ang = prop:GetAngles()
     local scale = prop:GetScale()
+    
+    -- Create transform matrix
+    local matrix = Matrix()
+    matrix:Translate(pos)
+    matrix:Rotate(ang)
+    
     if scale ~= 1 then
-        matrix:Scale(Vector(scale, scale, scale))
+        local scaleMatrix = Matrix()
+        scaleMatrix:Scale(Vector(scale, scale, scale))
+        matrix = matrix * scaleMatrix
     end
     
-    -- Apply transform
+    -- Apply transform using shared function
     RTX.Shared.PushMatrix(matrix)
     
-    -- Render each mesh with its material
-    for _, meshData in ipairs(meshGroup) do
-        local material = propCache.materials[meshData.material]
-        if material and meshData.mesh then
-            render.SetMaterial(material)
-            meshData.mesh:Draw()
+    -- Render meshes
+    local material = propCache.materials[meshGroup.material]
+    if material then
+        render.SetMaterial(material)
+        for _, mesh in ipairs(meshGroup.meshes) do
+            mesh:Draw()
         end
     end
     
