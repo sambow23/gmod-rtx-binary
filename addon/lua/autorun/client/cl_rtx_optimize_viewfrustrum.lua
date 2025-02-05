@@ -503,7 +503,7 @@ local function CreateSettingsPanel(panel)
     staticPanel:DockMargin(8, 8, 8, 8)
     staticPanel:SetPaintBackground(false)
     staticPanel:SetVisible(cv_static_mode:GetBool())
-    staticPanel:SetTall(160)
+    staticPanel:SetTall(180)
     
     -- Static bounds settings
     local staticForm = vgui.Create("DForm", staticPanel)
