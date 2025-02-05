@@ -1,192 +1,226 @@
--- RTX Static Prop Renderer
-if not CLIENT then return end
 require("niknaks")
 
--- Constants
-local MAX_VERTICES = 10000 -- Maximum vertices per mesh batch
+local mapProps = {}
 
--- Cache and state management
-local isEnabled = false
-local propCache = {
-    meshes = {}, -- Key: model path, Value: array of meshes
-    materials = {} -- Key: material path, Value: IMaterial
-}
-
--- Initialization function to build mesh cache
-local function BuildPropCache()
-    if not NikNaks or not NikNaks.CurrentMap then return end
+-- Initialize entity with required tables
+local function InitP2MEntity(ent)
+    ent.prop2mesh_controllers = ent.prop2mesh_controllers or {}
+    ent.prop2mesh_partlists = ent.prop2mesh_partlists or {}
     
-    print("[RTX Props] Building static prop cache...")
-    local startTime = SysTime()
-    
-    -- Clear existing cache
-    for _, meshGroup in pairs(propCache.meshes) do
-        for _, meshData in ipairs(meshGroup) do
-            if meshData.mesh and meshData.mesh.Destroy then
-                meshData.mesh:Destroy()
-            end
-        end
+    -- Basic controller initialization
+    function ent:AddController()
+        table.insert(self.prop2mesh_controllers, {
+            crc = "!none",
+            uvs = 0,
+            bump = false,
+            col = Color(255, 255, 255, 255),
+            mat = "hunter/myplastic",
+            scale = Vector(1, 1, 1),
+            clips = {}
+        })
+        return #self.prop2mesh_controllers
     end
-    propCache.meshes = {}
-    propCache.materials = {}
-    
-    -- Get all static props from the map
-    local staticProps = NikNaks.CurrentMap:GetStaticProps()
-    RTX.Shared.RenderStats.totalProps = #staticProps
-    
-    -- Build cache for each unique model
-    for _, prop in pairs(staticProps) do
-        local modelPath = prop:GetModel()
-        if not propCache.meshes[modelPath] then
-            local meshes = util.GetModelMeshes(modelPath)
-            if meshes then
-                propCache.meshes[modelPath] = {}
-                
-                -- Generate proper vertex data
-                local vertices = RTX.Shared.GenerateVertexData(meshes)
-                if #vertices > 0 then
-                    -- Create mesh batches
-                    local materialPath = meshes[1].material -- Assuming same material for all vertices
-                    if not propCache.materials[materialPath] then
-                        propCache.materials[materialPath] = Material(materialPath)
+
+    -- Add SetControllerData method
+    function ent:SetControllerData(index, partlist, uvs, addTo)
+        local info = self.prop2mesh_controllers[index]
+        if not info or not partlist then
+            return
+        end
+
+        if addTo and next(partlist) then
+            local currentData = self:GetControllerData(index)
+            if currentData then
+                for i = 1, #currentData do
+                    partlist[#partlist + 1] = currentData[i]
+                end
+                if currentData.custom then
+                    if not partlist.custom then
+                        partlist.custom = {}
                     end
-                    
-                    local meshBatches = RTX.Shared.CreateMeshBatch(vertices, propCache.materials[materialPath], MAX_VERTICES)
-                    if meshBatches then
-                        propCache.meshes[modelPath] = {
-                            meshes = meshBatches,
-                            material = materialPath
-                        }
+                    for crc, data in pairs(currentData.custom) do
+                        partlist.custom[crc] = data
                     end
                 end
             end
         end
-    end
-    print(string.format("[RTX Props] Built prop cache in %.2f seconds", SysTime() - startTime))
-end
 
--- Rendering function
-local function RenderProp(prop)
-    local modelPath = prop:GetModel()
-    local meshGroup = propCache.meshes[modelPath]
-    if not meshGroup then return end
-    
-    local pos = prop:GetPos()
-    local ang = prop:GetAngles()
-    local scale = prop:GetScale()
-    
-    -- Create transform matrix
-    local matrix = Matrix()
-    matrix:Translate(pos)
-    matrix:Rotate(ang)
-    
-    if scale ~= 1 then
-        local scaleMatrix = Matrix()
-        scaleMatrix:Scale(Vector(scale, scale, scale))
-        matrix = matrix * scaleMatrix
-    end
-    
-    -- Apply transform using shared function
-    RTX.Shared.PushMatrix(matrix)
-    
-    -- Render meshes
-    local material = propCache.materials[meshGroup.material]
-    if material then
-        render.SetMaterial(material)
-        for _, mesh in ipairs(meshGroup.meshes) do
-            mesh:Draw()
+        if not next(partlist) then
+            self:ResetControllerData(index)
+            return
         end
-    end
-    
-    RTX.Shared.PopMatrix()
-    RTX.Shared.RenderStats.propsRendered = RTX.Shared.RenderStats.propsRendered + 1
-end
 
--- Main render hook
-local function RenderStaticProps()
-    if not isEnabled then return end
-    RTX.Shared.RenderStats.propsRendered = 0
-    
-    if RTX.ConVars.DEBUG:GetBool() then
-        render.SetColorMaterial()
-    end
-    
-    for _, prop in pairs(NikNaks.CurrentMap:GetStaticProps()) do
-        RenderProp(prop)
-    end
-end
+        -- Sanitize custom data (from prop2mesh)
+        if partlist.custom then
+            local lookup = {}
+            for crc, data in pairs(partlist.custom) do
+                lookup[crc .. ""] = data
+            end
 
--- Debug command
-concommand.Add("rtx_props_debug", function()
-    local props = NikNaks.CurrentMap:GetStaticProps()
-    print("\n=== RTX Props Debug ===")
-    print("Enabled:", isEnabled)
-    print("Total Props:", RTX.Shared.RenderStats.totalProps)
-    print("Props Rendered Last Frame:", RTX.Shared.RenderStats.propsRendered)
-    print("Unique Models:", table.Count(propCache.meshes))
-    print("Cached Materials:", table.Count(propCache.materials))
-    print("\nProp List:")
-    
-    local modelCounts = {}
-    for _, prop in pairs(props) do
-        local model = prop:GetModel()
-        modelCounts[model] = (modelCounts[model] or 0) + 1
-    end
-    
-    for model, count in pairs(modelCounts) do
-        local cached = propCache.meshes[model] and "Cached" or "Not Cached"
-        print(string.format("%s: %d instances (%s)", model, count, cached))
-    end
-    print("=====================\n")
-end)
+            local custom = {}
+            for index, part in ipairs(partlist) do
+                if part.objd then
+                    local crc = part.objd .. ""
+                    if crc and lookup[crc] then
+                        custom[crc] = lookup[crc]
+                        lookup[crc] = nil
+                    end
+                end
+                if not next(lookup) then
+                    break
+                end
+            end
 
--- Enable/Disable functions
-local function EnableCustomRendering()
-    if isEnabled then return end
-    isEnabled = true
-    
-    hook.Add("PreDrawOpaqueRenderables", "RTXCustomProps", RenderStaticProps)
-end
+            partlist.custom = custom
+        end
 
-local function DisableCustomRendering()
-    if not isEnabled then return end
-    isEnabled = false
-    
-    hook.Remove("PreDrawOpaqueRenderables", "RTXCustomProps")
-end
+        local json = util.TableToJSON(partlist)
+        if not json then
+            return
+        end
 
--- Initialization
-hook.Add("InitPostEntity", "RTXPropsInit", function()
-    local success, err = pcall(BuildPropCache)
-    if not success then
-        ErrorNoHalt("[RTX Props] Failed to build prop cache: " .. tostring(err) .. "\n")
-        return
-    end
-    
-    if RTX.ConVars.PROPS_ENABLED:GetBool() then
-        EnableCustomRendering()
-    end
-end)
+        local data = util.Compress(json)
+        local dcrc = util.CRC(data)
+        local icrc = info.crc
 
--- Cleanup
-hook.Add("ShutDown", "RTXCustomProps", function()
-    DisableCustomRendering()
-    for _, meshGroup in pairs(propCache.meshes) do
-        for _, meshData in ipairs(meshGroup) do
-            if meshData.mesh and meshData.mesh.Destroy then
-                meshData.mesh:Destroy()
+        if icrc == dcrc then
+            return
+        end
+
+        self.prop2mesh_partlists[dcrc] = data
+        info.crc = dcrc
+
+        if uvs then
+            info.uvs = uvs
+        end
+
+        local keepdata = false
+        for k, v in pairs(self.prop2mesh_controllers) do
+            if v.crc == icrc then
+                keepdata = true
+                break
             end
         end
+        if not keepdata then
+            self.prop2mesh_partlists[icrc] = nil
+        end
     end
-    propCache.meshes = {}
-    propCache.materials = {}
+
+    -- Add GetControllerData method
+    function ent:GetControllerData(index)
+        if not self.prop2mesh_controllers[index] then
+            return
+        end
+        local ret = self.prop2mesh_partlists[self.prop2mesh_controllers[index].crc]
+        if not ret then
+            return ret
+        end
+        return util.JSONToTable(util.Decompress(ret))
+    end
+
+    -- Add ResetControllerData method
+    function ent:ResetControllerData(index)
+        if self.prop2mesh_controllers[index] then
+            self.prop2mesh_controllers[index].crc = "!none"
+        end
+    end
+end
+
+-- Wait for map to load and props to be available
+hook.Add("InitPostEntity", "StaticProp2MeshInit", function()
+    local mapData = NikNaks.CurrentMap
+    if not mapData then 
+        ErrorNoHalt("StaticProp2Mesh: Unable to load map data!")
+        return 
+    end
+
+    -- Create single prop2mesh entity to handle all static props
+    local p2m = ents.CreateClientside("sent_prop2mesh")
+    if not IsValid(p2m) then
+        ErrorNoHalt("StaticProp2Mesh: Failed to create prop2mesh entity!")
+        return
+    end
+
+    InitP2MEntity(p2m)
+
+    p2m:SetModel("models/hunter/plates/plate.mdl")
+    -- Remove SetNoDraw since we want to render
+    p2m:Spawn()
+    p2m:Activate()
+
+    -- Get all static props
+    local props = mapData:GetStaticProps()
+    if not props then
+        ErrorNoHalt("StaticProp2Mesh: No static props found!")
+        return
+    end
+
+    -- Group props by model for efficiency
+    local propsByModel = {}
+    for _, prop in pairs(props) do
+        local model = prop:GetModel()
+        propsByModel[model] = propsByModel[model] or {}
+        table.insert(propsByModel[model], prop)
+    end
+
+    -- Create controllers for each model type
+    for model, propsOfModel in pairs(propsByModel) do
+        -- Create mesh data array
+        local meshData = {}
+        
+        -- Add each prop instance
+        for _, prop in ipairs(propsOfModel) do
+            table.insert(meshData, {
+                prop = model,
+                pos = prop:GetPos(),
+                ang = prop:GetAngles(),
+                scale = Vector(prop:GetScale(), prop:GetScale(), prop:GetScale()),
+                col = prop:GetColor()
+            })
+        end
+
+        -- Add controller and set data
+        local controllerIndex = p2m:AddController()
+        p2m:SetControllerData(controllerIndex, meshData)
+    end
+
+    -- Store reference to prevent garbage collection
+    mapProps.entity = p2m
+
+    -- Debug info
+    print("Static Prop2Mesh initialized with:")
+    print("- Total models:", table.Count(propsByModel))
+    print("- Total controllers:", #p2m.prop2mesh_controllers)
 end)
 
--- ConVar Changes
-cvars.AddChangeCallback("rtx_force_render_props", function(_, _, new)
-    if tobool(new) then
-        EnableCustomRendering()
-    else
-        DisableCustomRendering()
+-- Disable engine static prop rendering
+local cvar = CreateClientConVar("r_drawstaticprops", "0", true, false)
+
+-- Debug visualization
+if ConVarExists("developer") and GetConVar("developer"):GetInt() > 0 then
+    hook.Add("PostDrawTranslucentRenderables", "StaticProp2MeshDebug", function()
+        if not IsValid(mapProps.entity) then return end
+        
+        -- Draw boxes around each prop location
+        for _, controller in ipairs(mapProps.entity.prop2mesh_controllers) do
+            local meshData = mapProps.entity:GetControllerData(controller)
+            if meshData then
+                for _, prop in ipairs(meshData) do
+                    render.DrawWireframeBox(prop.pos, prop.ang, Vector(-5, -5, -5), Vector(5, 5, 5), Color(0, 255, 0), true)
+                end
+            end
+        end
+    end)
+end
+
+-- Optional debug command
+concommand.Add("staticprop2mesh_debug", function()
+    if IsValid(mapProps.entity) then
+        print("Static Prop2Mesh Stats:")
+        print("Controllers:", #mapProps.entity.prop2mesh_controllers)
+        for i, controller in ipairs(mapProps.entity.prop2mesh_controllers) do
+            local meshData = mapProps.entity:GetControllerData(i)
+            print(string.format("Controller %d: %d props", i, meshData and #meshData or 0))
+        end
     end
 end)
