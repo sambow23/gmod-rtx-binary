@@ -49,27 +49,23 @@ void RTXLightManager::EndFrame() {
 }
 
 bool RTXLightManager::IsValidHandle(remixapi_LightHandle handle) const {
-    if (!m_initialized || !m_remix || !handle) {
+    if (!handle || !m_initialized || !m_remix) {
         return false;
     }
 
-    // Check if handle exists in our managed lights
-    for (const auto& light : m_lights) {
-        if (light.handle == handle) {
-            return true;
-        }
+    EnterCriticalSection(&m_lightCS);
+    try {
+        // Check if handle exists in our tracked lights
+        bool exists = std::any_of(m_lights.begin(), m_lights.end(),
+            [handle](const ManagedLight& light) { return light.handle == handle; });
+        
+        LeaveCriticalSection(&m_lightCS);
+        return exists;
     }
-
-    // Check pending updates
-    std::queue<PendingUpdate> tempQueue = m_pendingUpdates;
-    while (!tempQueue.empty()) {
-        if (tempQueue.front().handle == handle) {
-            return true;
-        }
-        tempQueue.pop();
+    catch (...) {
+        LeaveCriticalSection(&m_lightCS);
+        return false;
     }
-
-    return false;
 }
 
 void RTXLightManager::ProcessPendingUpdates() {
@@ -192,10 +188,12 @@ remixapi_LightHandle RTXLightManager::CreateLight(const LightProperties& props, 
     
     try {
         // Check if we already have a light for this entity
-        if (HasLightForEntity(entityID)) {
-            LogMessage("Warning: Attempted to create duplicate light for entity %llu\n", entityID);
-            auto existingLight = m_lightsByEntityID.find(entityID);
-            auto existingHandle = existingLight->second.handle;
+        auto it = m_lightsByEntityID.find(entityID);
+        if (it != m_lightsByEntityID.end()) {
+            auto existingHandle = it->second.handle;
+            static int warningCount = 0;
+            LogMessage("Warning: Attempted to create duplicate light for entity %llu (x%d)\n", 
+                entityID, ++warningCount);
             LeaveCriticalSection(&m_lightCS);
             return existingHandle;
         }
@@ -211,7 +209,6 @@ remixapi_LightHandle RTXLightManager::CreateLight(const LightProperties& props, 
         sphereLight.shaping_hasvalue = false;
         memset(&sphereLight.shaping_value, 0, sizeof(sphereLight.shaping_value));
 
-        // Create light info
         auto lightInfo = remixapi_LightInfo{};
         lightInfo.sType = REMIXAPI_STRUCT_TYPE_LIGHT_INFO;
         lightInfo.pNext = &sphereLight;
@@ -222,7 +219,6 @@ remixapi_LightHandle RTXLightManager::CreateLight(const LightProperties& props, 
             props.b * props.brightness
         };
 
-        // Create the light
         auto result = m_remix->CreateLight(lightInfo);
         if (!result) {
             LogMessage("Remix CreateLight failed\n");
@@ -230,37 +226,20 @@ remixapi_LightHandle RTXLightManager::CreateLight(const LightProperties& props, 
             return nullptr;
         }
 
-        // Get the light handle from the result
-        remixapi_LightHandle newHandle = result.value();
-
-        // Create managed light entry
         ManagedLight managedLight{};
-        managedLight.handle = newHandle;
+        managedLight.handle = result.value();
         managedLight.properties = props;
+        managedLight.entityID = entityID;
         managedLight.lastUpdateTime = GetTickCount64() / 1000.0f;
-        managedLight.needsUpdate = false;
-
-        // Add to tracking containers
-        {
-            EnterCriticalSection(&m_updateCS);
-            m_activeHandles[newHandle] = true;
-            LeaveCriticalSection(&m_updateCS);
-        }
 
         m_lights.push_back(managedLight);
         m_lightsByEntityID[entityID] = managedLight;
-        
-        // Mark for redraw
-        m_requiresRedraw = true;
-        
-        LogMessage("Successfully created light handle: %p (Total lights: %d)\n", 
-            newHandle, m_lights.size());
 
-        // Draw the light immediately after creation
-        DrawLights();
+        LogMessage("Successfully created light handle: %p (Total lights: %d)\n", 
+            managedLight.handle, m_lights.size());
 
         LeaveCriticalSection(&m_lightCS);
-        return newHandle;
+        return managedLight.handle;
     }
     catch (...) {
         LogMessage("Exception in CreateLight\n");
@@ -374,37 +353,41 @@ uint64_t RTXLightManager::GenerateLightHash() const {
 }
 
 bool RTXLightManager::UpdateLight(remixapi_LightHandle handle, const LightProperties& props, remixapi_LightHandle* newHandle) {
-    if (!m_initialized || !m_remix) return false;
+    if (!m_initialized || !m_remix || !handle) return false;
 
-    // Prevent recursive updates
-    if (m_isUpdating.exchange(true)) {
-        LogMessage("Warning: Recursive UpdateLight call detected\n");
-        return false;
-    }
-
-    EnterCriticalSection(&m_updateCS);
+    EnterCriticalSection(&m_lightCS);
     
     try {
-        // Validate handle
-        if (!ValidateLightHandle(handle)) {
-            LogMessage("Attempted to update invalid light handle: %p\n", handle);
-            LeaveCriticalSection(&m_updateCS);
-            m_isUpdating = false;
+        // Find existing light
+        auto lightIt = std::find_if(m_lights.begin(), m_lights.end(),
+            [handle](const ManagedLight& light) { return light.handle == handle; });
+
+        if (lightIt == m_lights.end()) {
+            LeaveCriticalSection(&m_lightCS);
             return false;
         }
 
-        // Store old properties for rollback if needed
-        LightProperties oldProps;
-        bool foundOld = false;
-        for (const auto& light : m_lights) {
-            if (light.handle == handle) {
-                oldProps = light.properties;
-                foundOld = true;
-                break;
-            }
+        // Check if update is needed
+        bool needsUpdate = false;
+        const auto& currentProps = lightIt->properties;
+        
+        float posDiff = std::abs(currentProps.x - props.x) + 
+                       std::abs(currentProps.y - props.y) + 
+                       std::abs(currentProps.z - props.z);
+        
+        needsUpdate = posDiff > 0.01f || 
+                     currentProps.size != props.size ||
+                     currentProps.brightness != props.brightness ||
+                     currentProps.r != props.r ||
+                     currentProps.g != props.g ||
+                     currentProps.b != props.b;
+
+        if (!needsUpdate) {
+            LeaveCriticalSection(&m_lightCS);
+            return true;
         }
 
-        // Create sphere light info for new light
+        // Update the light
         auto sphereLight = remixapi_LightInfoSphereEXT{};
         sphereLight.sType = REMIXAPI_STRUCT_TYPE_LIGHT_INFO_SPHERE_EXT;
         sphereLight.position = {props.x, props.y, props.z};
@@ -412,70 +395,40 @@ bool RTXLightManager::UpdateLight(remixapi_LightHandle handle, const LightProper
         sphereLight.shaping_hasvalue = false;
         memset(&sphereLight.shaping_value, 0, sizeof(sphereLight.shaping_value));
 
-        // Create light info
         auto lightInfo = remixapi_LightInfo{};
         lightInfo.sType = REMIXAPI_STRUCT_TYPE_LIGHT_INFO;
         lightInfo.pNext = &sphereLight;
-        lightInfo.hash = GenerateLightHash();
+        lightInfo.hash = lightIt->properties.hash;  // Keep the same hash
         lightInfo.radiance = {
             props.r * props.brightness,
             props.g * props.brightness,
             props.b * props.brightness
         };
 
-        // Create new light before destroying old one
+        // Create new light
         auto result = m_remix->CreateLight(lightInfo);
-        
         if (!result) {
-            LogMessage("Failed to create new light during update\n");
-            LeaveCriticalSection(&m_updateCS);
-            m_isUpdating = false;
+            LeaveCriticalSection(&m_lightCS);
             return false;
         }
 
-        // Only destroy old after successful creation
-        m_remix->DestroyLight(handle);
+        // Update handles and properties
+        auto newLightHandle = result.value();
+        m_remix->DestroyLight(lightIt->handle);
+        lightIt->handle = newLightHandle;
+        lightIt->properties = props;
+        lightIt->properties.hash = lightInfo.hash;
 
-        // Update tracking
-        bool updated = false;
-        for (auto& light : m_lights) {
-            if (light.handle == handle) {
-                light.handle = result.value();
-                light.properties = props;
-                light.lastUpdateTime = GetTickCount64() / 1000.0f;
-                light.needsUpdate = false;
-                updated = true;
-                if (newHandle) *newHandle = light.handle;
-                break;
-            }
+        if (newHandle) {
+            *newHandle = newLightHandle;
         }
 
-        // Update entity tracking
-        for (auto& pair : m_lightsByEntityID) {
-            if (pair.second.handle == handle) {
-                pair.second.handle = result.value();
-                pair.second.properties = props;
-                pair.second.lastUpdateTime = GetTickCount64() / 1000.0f;
-                pair.second.needsUpdate = false;
-                break;
-            }
-        }
-
-        if (!updated) {
-            LogMessage("Warning: Light handle not found in tracking list\n");
-        }
-
-        // Mark for redraw
-        m_requiresRedraw = true;
-
-        LeaveCriticalSection(&m_updateCS);
-        m_isUpdating = false;
+        LeaveCriticalSection(&m_lightCS);
         return true;
     }
     catch (...) {
         LogMessage("Exception in UpdateLight\n");
-        LeaveCriticalSection(&m_updateCS);
-        m_isUpdating = false;
+        LeaveCriticalSection(&m_lightCS);
         return false;
     }
 }
