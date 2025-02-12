@@ -72,7 +72,6 @@ LUA_FUNCTION(RegisterRTXLightEntityValidator) {
 LUA_FUNCTION(CreateRTXLight) {
     try {
         if (!g_remix) {
-            Msg("[RTX Remix Fixes] Remix interface is null\n");
             LUA->ThrowError("[RTX Remix Fixes] - Remix interface is null");
             return 0;
         }
@@ -85,12 +84,7 @@ LUA_FUNCTION(CreateRTXLight) {
         float r = LUA->CheckNumber(6);
         float g = LUA->CheckNumber(7);
         float b = LUA->CheckNumber(8);
-        // Get entity ID from Lua, default to 0 if not provided
         uint64_t entityID = LUA->IsType(9, Type::NUMBER) ? static_cast<uint64_t>(LUA->GetNumber(9)) : 0;
-
-        // Debug print received values
-        Msg("[RTX Light Module] Received values - Pos: %.2f,%.2f,%.2f, Size: %f, Brightness: %f, Color: %f,%f,%f, EntityID: %llu\n",
-            x, y, z, size, brightness, r, g, b, entityID);
 
         auto props = RTXLightManager::LightProperties();
         props.x = x;
@@ -103,60 +97,37 @@ LUA_FUNCTION(CreateRTXLight) {
         props.b = b / 255.0f;
 
         auto& manager = RTXLightManager::Instance();
-        auto handle = manager.CreateLight(props, entityID);  // Pass the entityID
+        auto handle = manager.CreateLight(props, entityID);
+        
         if (!handle) {
-            Msg("[RTX Light Module] Failed to create light!\n");
-            LUA->ThrowError("[RTX Remix Fixes] - Failed to create light");
-            return 0;
+            LUA->PushNil();
+            return 1;
         }
 
-        Msg("[RTX Light Module] Light created successfully with handle %p\n", handle);
-        LUA->PushUserdata(handle);
+        // Push the handle
+        LUA->PushUserType(handle, Type::USERDATA);
         return 1;
     }
     catch (...) {
-        Msg("[RTX Light Module] Exception in CreateRTXLight\n");
-        LUA->ThrowError("[RTX Remix Fixes] - Exception in light creation");
-        return 0;
+        LUA->PushNil();
+        return 1;
     }
 }
-
 
 LUA_FUNCTION(UpdateRTXLight) {
     try {
         if (!g_remix) {
-            Msg("[RTX Remix Fixes] Remix interface is null\n");
             LUA->PushBool(false);
             return 1;
         }
 
-        // Validate userdata type
         if (!LUA->IsType(1, Type::USERDATA)) {
-            Msg("[RTX Remix Fixes] First argument must be userdata\n");
             LUA->PushBool(false);
             return 1;
         }
 
         auto handle = static_cast<remixapi_LightHandle>(LUA->GetUserdata(1));
         if (!handle) {
-            Msg("[RTX Remix Fixes] Invalid light handle (null)\n");
-            LUA->PushBool(false);
-            return 1;
-        }
-
-        // Additional handle validation
-        bool isValidHandle = false;
-        try {
-            auto& manager = RTXLightManager::Instance();
-            isValidHandle = manager.IsValidHandle(handle);
-        } catch (...) {
-            Msg("[RTX Remix Fixes] Exception checking handle validity\n");
-            LUA->PushBool(false);
-            return 1;
-        }
-
-        if (!isValidHandle) {
-            Msg("[RTX Remix Fixes] Invalid light handle (not found)\n");
             LUA->PushBool(false);
             return 1;
         }
@@ -170,36 +141,30 @@ LUA_FUNCTION(UpdateRTXLight) {
         float g = LUA->CheckNumber(8);
         float b = LUA->CheckNumber(9);
 
-        Msg("[RTX Remix Fixes] Updating light at (%f, %f, %f) with size %f and brightness %f\n", 
-            x, y, z, size, brightness);
-
         auto props = RTXLightManager::LightProperties();
         props.x = x;
         props.y = y;
         props.z = z;
-        props.size = size < 1.0f ? 1.0f : size;
-        props.brightness = brightness < 0.1f ? 0.1f : brightness;
-        props.r = (r / 255.0f) > 1.0f ? 1.0f : (r / 255.0f < 0.0f ? 0.0f : r / 255.0f);
-        props.g = (g / 255.0f) > 1.0f ? 1.0f : (g / 255.0f < 0.0f ? 0.0f : g / 255.0f);
-        props.b = (b / 255.0f) > 1.0f ? 1.0f : (b / 255.0f < 0.0f ? 0.0f : b / 255.0f);
+        props.size = size;
+        props.brightness = brightness;
+        props.r = r / 255.0f;
+        props.g = g / 255.0f;
+        props.b = b / 255.0f;
 
         auto& manager = RTXLightManager::Instance();
-        remixapi_LightHandle newHandle;
-        if (!manager.UpdateLight(handle, props, &newHandle)) {
-            Msg("[RTX Remix Fixes] Failed to update light\n");
-            LUA->PushBool(false);
-            return 1;
-        }
+        remixapi_LightHandle newHandle = nullptr;
+        bool success = manager.UpdateLight(handle, props, &newHandle);
 
-        LUA->PushBool(true);
-        if (newHandle != handle) {
-            LUA->PushUserdata(newHandle);
-            return 2;
+        LUA->PushBool(success);
+        
+        if (success && newHandle && newHandle != handle) {
+            LUA->PushUserType(newHandle, Type::USERDATA);
+            return 2;  // Return both success and new handle
         }
-        return 1;
+        
+        return 1;  // Return just success
     }
     catch (...) {
-        Msg("[RTX Remix Fixes] Exception in UpdateRTXLight\n");
         LUA->PushBool(false);
         return 1;
     }

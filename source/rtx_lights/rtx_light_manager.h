@@ -14,11 +14,16 @@
 class RTXLightManager {
 public:
     struct LightProperties {
-        float x, y, z;          
-        float size;             
-        float brightness;       
-        float r, g, b;          
-    };
+            float x = 0.0f;
+            float y = 0.0f;
+            float z = 0.0f;
+            float size = 1.0f;
+            float brightness = 1.0f;
+            float r = 1.0f;
+            float g = 1.0f;
+            float b = 1.0f;
+            uint64_t hash = 0;  // Add this field for light identity tracking
+        };
 
     struct PendingUpdate {
         remixapi_LightHandle handle;
@@ -30,6 +35,7 @@ public:
     struct ManagedLight {
         remixapi_LightHandle handle;
         LightProperties properties;
+        uint64_t entityID = 0;
         float lastUpdateTime;
         bool needsUpdate;
     };
