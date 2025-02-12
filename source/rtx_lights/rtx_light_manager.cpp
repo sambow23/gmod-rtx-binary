@@ -24,10 +24,12 @@ RTXLightManager::~RTXLightManager() {
 }
 
 void RTXLightManager::BeginFrame() {
+    if (!m_initialized || !m_remix) return;
+
     EnterCriticalSection(&m_updateCS);
     m_isFrameActive = true;
     
-    // Process any pending destroys from last frame
+    // Process any pending destroys
     for (const auto& light : m_lightsToDestroy) {
         if (m_remix && light.handle) {
             m_remix->DestroyLight(light.handle);
@@ -35,36 +37,14 @@ void RTXLightManager::BeginFrame() {
     }
     m_lightsToDestroy.clear();
 
-    // Store current lights that need updates for recreation
-    std::vector<remixapi_LightHandle> handlesToUpdate;
-    while (!m_pendingUpdates.empty()) {
-        const auto& update = m_pendingUpdates.front();
-        if (update.needsUpdate) {
-            handlesToUpdate.push_back(update.handle);
-        }
-        m_pendingUpdates.pop();
-    }
-
-    // Remove lights that need updates
-    for (const auto& handleToUpdate : handlesToUpdate) {
-        for (auto it = m_lights.begin(); it != m_lights.end(); ) {
-            if (it->handle == handleToUpdate) {
-                m_lightsToDestroy.push_back(*it);
-                it = m_lights.erase(it);
-            } else {
-                ++it;
-            }
-        }
-    }
-
     ProcessPendingUpdates();
-    LeaveCriticalSection(&m_updateCS);
 }
 
 void RTXLightManager::EndFrame() {
-    EnterCriticalSection(&m_updateCS);
-    m_isFrameActive = false;
+    if (!m_initialized) return;
+    
     ProcessPendingUpdates();
+    m_isFrameActive = false;
     LeaveCriticalSection(&m_updateCS);
 }
 
@@ -214,7 +194,8 @@ remixapi_LightHandle RTXLightManager::CreateLight(const LightProperties& props, 
         // Check if we already have a light for this entity
         if (HasLightForEntity(entityID)) {
             LogMessage("Warning: Attempted to create duplicate light for entity %llu\n", entityID);
-            auto existingHandle = m_lightsByEntityID[entityID].handle;
+            auto existingLight = m_lightsByEntityID.find(entityID);
+            auto existingHandle = existingLight->second.handle;
             LeaveCriticalSection(&m_lightCS);
             return existingHandle;
         }
@@ -222,6 +203,7 @@ remixapi_LightHandle RTXLightManager::CreateLight(const LightProperties& props, 
         LogMessage("Creating light at (%f, %f, %f) with size %f\n", 
             props.x, props.y, props.z, props.size);
 
+        // Create sphere light info
         auto sphereLight = remixapi_LightInfoSphereEXT{};
         sphereLight.sType = REMIXAPI_STRUCT_TYPE_LIGHT_INFO_SPHERE_EXT;
         sphereLight.position = {props.x, props.y, props.z};
@@ -229,6 +211,7 @@ remixapi_LightHandle RTXLightManager::CreateLight(const LightProperties& props, 
         sphereLight.shaping_hasvalue = false;
         memset(&sphereLight.shaping_value, 0, sizeof(sphereLight.shaping_value));
 
+        // Create light info
         auto lightInfo = remixapi_LightInfo{};
         lightInfo.sType = REMIXAPI_STRUCT_TYPE_LIGHT_INFO;
         lightInfo.pNext = &sphereLight;
@@ -239,6 +222,7 @@ remixapi_LightHandle RTXLightManager::CreateLight(const LightProperties& props, 
             props.b * props.brightness
         };
 
+        // Create the light
         auto result = m_remix->CreateLight(lightInfo);
         if (!result) {
             LogMessage("Remix CreateLight failed\n");
@@ -246,21 +230,37 @@ remixapi_LightHandle RTXLightManager::CreateLight(const LightProperties& props, 
             return nullptr;
         }
 
+        // Get the light handle from the result
+        remixapi_LightHandle newHandle = result.value();
+
+        // Create managed light entry
         ManagedLight managedLight{};
-        managedLight.handle = result.value();
+        managedLight.handle = newHandle;
         managedLight.properties = props;
         managedLight.lastUpdateTime = GetTickCount64() / 1000.0f;
         managedLight.needsUpdate = false;
 
-        // Add to both tracking containers
+        // Add to tracking containers
+        {
+            EnterCriticalSection(&m_updateCS);
+            m_activeHandles[newHandle] = true;
+            LeaveCriticalSection(&m_updateCS);
+        }
+
         m_lights.push_back(managedLight);
         m_lightsByEntityID[entityID] = managedLight;
         
+        // Mark for redraw
+        m_requiresRedraw = true;
+        
         LogMessage("Successfully created light handle: %p (Total lights: %d)\n", 
-            managedLight.handle, m_lights.size());
+            newHandle, m_lights.size());
+
+        // Draw the light immediately after creation
+        DrawLights();
 
         LeaveCriticalSection(&m_lightCS);
-        return managedLight.handle;
+        return newHandle;
     }
     catch (...) {
         LogMessage("Exception in CreateLight\n");
@@ -385,7 +385,7 @@ bool RTXLightManager::UpdateLight(remixapi_LightHandle handle, const LightProper
     EnterCriticalSection(&m_updateCS);
     
     try {
-        // Validate handle before updating
+        // Validate handle
         if (!ValidateLightHandle(handle)) {
             LogMessage("Attempted to update invalid light handle: %p\n", handle);
             LeaveCriticalSection(&m_updateCS);
@@ -393,7 +393,7 @@ bool RTXLightManager::UpdateLight(remixapi_LightHandle handle, const LightProper
             return false;
         }
 
-        // Store old properties for rollback
+        // Store old properties for rollback if needed
         LightProperties oldProps;
         bool foundOld = false;
         for (const auto& light : m_lights) {
@@ -404,9 +404,26 @@ bool RTXLightManager::UpdateLight(remixapi_LightHandle handle, const LightProper
             }
         }
 
+        // Create sphere light info for new light
+        auto sphereLight = remixapi_LightInfoSphereEXT{};
+        sphereLight.sType = REMIXAPI_STRUCT_TYPE_LIGHT_INFO_SPHERE_EXT;
+        sphereLight.position = {props.x, props.y, props.z};
+        sphereLight.radius = props.size;
+        sphereLight.shaping_hasvalue = false;
+        memset(&sphereLight.shaping_value, 0, sizeof(sphereLight.shaping_value));
+
+        // Create light info
+        auto lightInfo = remixapi_LightInfo{};
+        lightInfo.sType = REMIXAPI_STRUCT_TYPE_LIGHT_INFO;
+        lightInfo.pNext = &sphereLight;
+        lightInfo.hash = GenerateLightHash();
+        lightInfo.radiance = {
+            props.r * props.brightness,
+            props.g * props.brightness,
+            props.b * props.brightness
+        };
+
         // Create new light before destroying old one
-        auto sphereLight = CreateSphereLight(props);
-        auto lightInfo = CreateLightInfo(sphereLight);
         auto result = m_remix->CreateLight(lightInfo);
         
         if (!result) {
@@ -426,8 +443,20 @@ bool RTXLightManager::UpdateLight(remixapi_LightHandle handle, const LightProper
                 light.handle = result.value();
                 light.properties = props;
                 light.lastUpdateTime = GetTickCount64() / 1000.0f;
+                light.needsUpdate = false;
                 updated = true;
                 if (newHandle) *newHandle = light.handle;
+                break;
+            }
+        }
+
+        // Update entity tracking
+        for (auto& pair : m_lightsByEntityID) {
+            if (pair.second.handle == handle) {
+                pair.second.handle = result.value();
+                pair.second.properties = props;
+                pair.second.lastUpdateTime = GetTickCount64() / 1000.0f;
+                pair.second.needsUpdate = false;
                 break;
             }
         }
@@ -435,6 +464,9 @@ bool RTXLightManager::UpdateLight(remixapi_LightHandle handle, const LightProper
         if (!updated) {
             LogMessage("Warning: Light handle not found in tracking list\n");
         }
+
+        // Mark for redraw
+        m_requiresRedraw = true;
 
         LeaveCriticalSection(&m_updateCS);
         m_isUpdating = false;
@@ -449,11 +481,20 @@ bool RTXLightManager::UpdateLight(remixapi_LightHandle handle, const LightProper
 }
 
 void RTXLightManager::DestroyLight(remixapi_LightHandle handle) {
-    EnterCriticalSection(&m_lightCS);  // Just use one Critical Section
-    
+    if (!handle) return;
+
+    {
+        std::lock_guard<std::mutex> lock(m_handleMutex);
+        auto it = m_activeHandles.find(handle);
+        if (it != m_activeHandles.end()) {
+            m_activeHandles.erase(it);
+        }
+    }
+
+    EnterCriticalSection(&m_lightCS);
     try {
-        // Find and remove from entity tracking
-        for (auto it = m_lightsByEntityID.begin(); it != m_lightsByEntityID.end(); ) {
+        // Remove from entity tracking
+        for (auto it = m_lightsByEntityID.begin(); it != m_lightsByEntityID.end();) {
             if (it->second.handle == handle) {
                 it = m_lightsByEntityID.erase(it);
             } else {
@@ -461,23 +502,19 @@ void RTXLightManager::DestroyLight(remixapi_LightHandle handle) {
             }
         }
 
-        // Find and remove all instances of this handle
-        auto it = m_lights.begin();
-        while (it != m_lights.end()) {
-            if (it->handle == handle) {
-                LogMessage("Destroying light handle: %p\n", handle);
-                m_remix->DestroyLight(it->handle);
-                it = m_lights.erase(it);
-            } else {
-                ++it;
-            }
+        // Remove from lights list
+        auto it = std::remove_if(m_lights.begin(), m_lights.end(),
+            [handle](const ManagedLight& light) { return light.handle == handle; });
+        m_lights.erase(it, m_lights.end());
+
+        // Destroy the light in Remix
+        if (m_remix) {
+            m_remix->DestroyLight(handle);
         }
-        LogMessage("Light cleanup complete, remaining lights: %d\n", m_lights.size());
     }
     catch (...) {
         LogMessage("Exception in DestroyLight\n");
     }
-
     LeaveCriticalSection(&m_lightCS);
 }
 
@@ -584,82 +621,22 @@ bool RTXLightManager::IsHandleStillValid(remixapi_LightHandle handle) {
 }
 
 void RTXLightManager::DrawLights() {
-    if (!m_initialized || !m_remix) return;
-    if (m_lights.empty()) return;
-
-    // Prevent recursive drawing
-    if (m_isDrawing.exchange(true)) {
-        LogMessage("Warning: Recursive DrawLights call detected\n");
-        return;
-    }
+    if (!m_initialized || !m_remix || m_lights.empty()) return;
 
     EnterCriticalSection(&m_lightCS);
     
-    std::vector<remixapi_LightHandle> invalidLights;
-    
     try {
-        m_frameCount++;
-
-        // Add periodic validation
-        ValidateResources();
-        
-        // Batch validation
-        for (const auto& light : m_lights) {
-            if (!ValidateLightHandle(light.handle)) {
-                invalidLights.push_back(light.handle);
-                LogMessage("Invalid light detected: %p\n", light.handle);
-            }
-        }
-
-        // Remove invalid lights first
-        if (!invalidLights.empty()) {
-            LogMessage("Cleaning up %zu invalid lights\n", invalidLights.size());
-            for (auto handle : invalidLights) {
-                DestroyLight(handle);
-            }
-        }
-
-        // Only process updates if not currently updating
-        if (!m_isFrameActive && !m_isUpdating) {
-            ProcessPendingUpdates();
-        }
-
-        // Draw remaining valid lights
         for (const auto& light : m_lights) {
             if (light.handle) {
-                try {
-                    auto result = m_remix->DrawLightInstance(light.handle);
-                    if (!static_cast<bool>(result)) {
-                        LogMessage("Failed to draw light %p\n", light.handle);
-                    }
-                } catch (...) {
-                    LogMessage("Exception drawing light %p\n", light.handle);
-                }
+                m_remix->DrawLightInstance(light.handle);
             }
         }
-
-        // Add handle validation
-        for (const auto& light : m_lights) {
-            if (light.handle && !IsHandleStillValid(light.handle)) {
-                invalidLights.push_back(light.handle);
-                LogMessage("Invalid light handle detected: %p\n", light.handle);
-            }
-        }
-
-        // Periodic validation (every 60 frames)
-        if ((m_frameCount % 60) == 0) {
-            ValidateState();
-        }
-    }
-    catch (const std::exception& e) {
-        LogMessage("Exception in DrawLights: %s\n", e.what());
     }
     catch (...) {
-        LogMessage("Unknown exception in DrawLights\n");
+        LogMessage("Exception in DrawLights\n");
     }
 
     LeaveCriticalSection(&m_lightCS);
-    m_isDrawing = false;
 }
 
 // Helper functions implementation...

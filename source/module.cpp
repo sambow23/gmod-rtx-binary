@@ -20,6 +20,17 @@ remix::Interface* g_remix = nullptr;
 
 using namespace GarrysMod::Lua;
 
+typedef HRESULT (WINAPI* Present_t)(IDirect3DDevice9* device, CONST RECT* pSourceRect, CONST RECT* pDestRect, HWND hDestWindowOverride, CONST RGNDATA* pDirtyRegion);
+Present_t Present_Original = nullptr;
+
+HRESULT WINAPI Present_Hook(IDirect3DDevice9* device, CONST RECT* pSourceRect, CONST RECT* pDestRect, HWND hDestWindowOverride, CONST RGNDATA* pDirtyRegion) {
+    if (g_remix && RTXLightManager::Instance().HasActiveLights()) {
+        RTXLightManager::Instance().DrawLights();
+    }
+    
+    return Present_Original(device, pSourceRect, pDestRect, hDestWindowOverride, pDirtyRegion);
+}
+
 LUA_FUNCTION(RTXBeginFrame) {
     RTXLightManager::Instance().BeginFrame();
     return 0;
@@ -252,10 +263,6 @@ GMOD_MODULE_OPEN() {
     try {
         Msg("[RTX Remix Fixes 2] - Module loaded!\n"); 
 
-        // Initialize shader protection
-        ShaderAPIHooks::Instance().Initialize();
-        ModelRenderHooks::Instance().Initialize();
-
         // Find Source's D3D9 device
         auto sourceDevice = static_cast<IDirect3DDevice9Ex*>(FindD3D9Device());
         if (!sourceDevice) {
@@ -272,6 +279,16 @@ GMOD_MODULE_OPEN() {
         }
 
         g_remix->dxvk_RegisterD3D9Device(sourceDevice);
+
+        // Setup frame rendering
+        void** vTable = *reinterpret_cast<void***>(sourceDevice);
+        Present_Original = reinterpret_cast<Present_t>(vTable[17]); // Present is at index 17
+
+        // Setup hook
+        DWORD oldProtect;
+        VirtualProtect(vTable + 17, sizeof(void*), PAGE_EXECUTE_READWRITE, &oldProtect);
+        vTable[17] = reinterpret_cast<void*>(&Present_Hook);
+        VirtualProtect(vTable + 17, sizeof(void*), oldProtect, &oldProtect);
 
         // Initialize RTX Light Manager
         RTXLightManager::Instance().Initialize(g_remix);
@@ -318,13 +335,20 @@ GMOD_MODULE_OPEN() {
 GMOD_MODULE_CLOSE() {
     try {
         Msg("[RTX] Shutting down module...\n");
-
-        // Shutdown shader protection
-        ShaderAPIHooks::Instance().Shutdown();
         
         RTXLightManager::Instance().Shutdown();
 
-        ModelRenderHooks::Instance().Shutdown();
+        // Restore original Present function if needed
+        if (Present_Original) {
+            auto device = static_cast<IDirect3DDevice9Ex*>(FindD3D9Device());
+            if (device) {
+                void** vTable = *reinterpret_cast<void***>(device);
+                DWORD oldProtect;
+                VirtualProtect(vTable + 17, sizeof(void*), PAGE_EXECUTE_READWRITE, &oldProtect);
+                vTable[17] = reinterpret_cast<void*>(Present_Original);
+                VirtualProtect(vTable + 17, sizeof(void*), oldProtect, &oldProtect);
+            }
+        }
 
         if (g_remix) {
             delete g_remix;
