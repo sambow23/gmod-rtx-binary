@@ -10,9 +10,6 @@ local DEFAULT_NOTIFICATION = {
 }
 local WHITE = Color(255, 255, 255, 255)
 
--- Track key states
-local altPressed = false
-local wasPressed = false
 
 local function blockInput()
     if enabled then
@@ -175,16 +172,8 @@ local function handleToggleMouse()
 end
 
 hook.Add("Think", "TMC_KeyBinding", function()
-    local altDown = input.IsKeyDown(KEY_LALT)
-    local xDown = input.IsKeyDown(KEY_X)
-    
-    -- Only toggle when both are pressed and wasn't already pressed
-    if altDown and xDown and not wasPressed then
-        wasPressed = true
+    if input.IsKeyDown(KEY_LALT) and input.IsKeyDown(KEY_X) and not debounce then
         handleToggleMouse()
-    -- Reset the wasPressed state only when both keys are released
-    elseif not altDown and not xDown and wasPressed then
-        wasPressed = false
     end
 end)
 

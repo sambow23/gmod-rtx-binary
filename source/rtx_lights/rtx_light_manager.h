@@ -57,12 +57,17 @@ public:
     void CleanupInvalidLights();
     void ValidateResources();
     bool IsHandleStillValid(remixapi_LightHandle handle);
+    void ProcessFrameRender();
+    bool HasActiveLights() const { return !m_lights.empty(); }
+    void OnFrameRender();  // Add this declaration
+    IDirect3DDevice9* GetD3D9Device() { return m_device; }
 
 private:
     RTXLightManager();
     ~RTXLightManager();
 
     // Internal helper functions
+    IDirect3DDevice9* m_device = nullptr;
     remixapi_LightInfoSphereEXT CreateSphereLight(const LightProperties& props);
     remixapi_LightInfo CreateLightInfo(const remixapi_LightInfoSphereEXT& sphereLight);
     uint64_t GenerateLightHash() const;
@@ -100,4 +105,16 @@ private:
     // Delete copy constructor and assignment operator
     RTXLightManager(const RTXLightManager&) = delete;
     RTXLightManager& operator=(const RTXLightManager&) = delete;
+
+    std::atomic<bool> m_requiresRedraw{false};
+    std::chrono::steady_clock::time_point m_lastDrawTime;
+    static constexpr double FRAME_RATE_LIMIT = 1.0 / 60.0; // 60 FPS limit
+    std::unordered_map<remixapi_LightHandle, bool> m_activeHandles;  // Track active handles
+    std::mutex m_handleMutex;
+    
+    // Add method to safely check handle validity
+    bool IsHandleActive(remixapi_LightHandle handle) {
+        std::lock_guard<std::mutex> lock(m_handleMutex);
+        return m_activeHandles.find(handle) != m_activeHandles.end();
+    }
 };
