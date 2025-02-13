@@ -10,28 +10,15 @@ function ENT:Initialize()
     self:SetNoDraw(true)
     self:DrawShadow(false)
     
-    if not self.rtxLightHandle then
-        self:CreateRTXLight()
-    end
-
-    self.lastPos = self:GetPos()
-    self.IsAnimating = false
-    self.AnimationHue = 0
+    -- Generate stable entity ID
+    self.rtxEntityID = self:EntIndex()
+    self:CreateRTXLight()
 end
 
 function ENT:CreateRTXLight()
-    -- Generate stable entity ID if not exists
-    if not self.rtxEntityID then
-        local baseIndex = self:EntIndex()
-        local timeComponent = math.floor(CurTime()) % 1000
-        self.rtxEntityID = (timeComponent * 1000000) + baseIndex
-    end
-
-    -- Clean up existing light
+    -- Clean up existing light if it exists
     if self.rtxLightHandle then
-        pcall(function()
-            DestroyRTXLight(self.rtxLightHandle)
-        end)
+        DestroyRTXLight(self.rtxLightHandle)
         self.rtxLightHandle = nil
     end
 
@@ -56,38 +43,13 @@ function ENT:CreateRTXLight()
 end
 
 function ENT:UpdateLight()
-    if not self.rtxLightHandle then
-        self:CreateRTXLight()
-        return
-    end
+    if not self.rtxLightHandle then return end
 
     local pos = self:GetPos()
-    -- Only update if position has changed
-    if self.lastPos and pos:DistToSqr(self.lastPos) < 0.01 then
-        return
-    end
+    if self.lastPos and pos:DistToSqr(self.lastPos) < 0.01 then return end
 
-    local success, newHandle = UpdateRTXLight(
-        self.rtxLightHandle,
-        pos.x, pos.y, pos.z,
-        self:GetLightSize(),
-        self:GetLightBrightness(),
-        self:GetLightR(),
-        self:GetLightG(),
-        self:GetLightB()
-    )
-
-    if success then
-        -- Update handle if a new one was returned
-        if newHandle then
-            self.rtxLightHandle = newHandle
-        end
-        self.lastPos = pos
-    else
-        -- If update failed, recreate the light
-        self.rtxLightHandle = nil
-        self:CreateRTXLight()
-    end
+    -- Destroy and recreate the light with new properties
+    self:CreateRTXLight()
 end
 
 function ENT:Think()
@@ -96,6 +58,24 @@ function ENT:Think()
     end
 end
 
+function ENT:OnRemove()
+    if self.rtxLightHandle then
+        DestroyRTXLight(self.rtxLightHandle)
+        self.rtxLightHandle = nil
+    end
+    activeRTXLights[self:EntIndex()] = nil
+end
+
+-- Undo handler
+hook.Add("EntityRemoved", "RTXLight_Cleanup", function(ent)
+    if IsValid(ent) and ent:GetClass() == "base_rtx_light" then
+        if ent.rtxLightHandle then
+            DestroyRTXLight(ent.rtxLightHandle)
+            ent.rtxLightHandle = nil
+        end
+        activeRTXLights[ent:EntIndex()] = nil
+    end
+end)
 hook.Add("ShutDown", "RTXLight_Emergency", function()
     for entIndex, ent in pairs(activeRTXLights) do
         if IsValid(ent) and ent.rtxLightHandle then

@@ -187,27 +187,32 @@ remixapi_LightHandle RTXLightManager::CreateLight(const LightProperties& props, 
     EnterCriticalSection(&m_lightCS);
     
     try {
-        // Check if we already have a light for this entity
-        auto it = m_lightsByEntityID.find(entityID);
-        if (it != m_lightsByEntityID.end()) {
-            auto existingHandle = it->second.handle;
-            static int warningCount = 0;
-            LogMessage("Warning: Attempted to create duplicate light for entity %llu (x%d)\n", 
-                entityID, ++warningCount);
-            LeaveCriticalSection(&m_lightCS);
-            return existingHandle;
+        // Remove any existing light for this entity
+        auto existingIt = m_lightsByEntityID.find(entityID);
+        if (existingIt != m_lightsByEntityID.end()) {
+            if (existingIt->second.handle) {
+                m_remix->DestroyLight(existingIt->second.handle);
+            }
+            
+            // Remove from both containers
+            auto lightIt = std::find_if(m_lights.begin(), m_lights.end(),
+                [handle = existingIt->second.handle](const ManagedLight& light) {
+                    return light.handle == handle;
+                });
+            
+            if (lightIt != m_lights.end()) {
+                m_lights.erase(lightIt);
+            }
+            
+            m_lightsByEntityID.erase(existingIt);
         }
 
-        LogMessage("Creating light at (%f, %f, %f) with size %f\n", 
-            props.x, props.y, props.z, props.size);
-
-        // Create sphere light info
+        // Create new light
         auto sphereLight = remixapi_LightInfoSphereEXT{};
         sphereLight.sType = REMIXAPI_STRUCT_TYPE_LIGHT_INFO_SPHERE_EXT;
         sphereLight.position = {props.x, props.y, props.z};
         sphereLight.radius = props.size;
         sphereLight.shaping_hasvalue = false;
-        memset(&sphereLight.shaping_value, 0, sizeof(sphereLight.shaping_value));
 
         auto lightInfo = remixapi_LightInfo{};
         lightInfo.sType = REMIXAPI_STRUCT_TYPE_LIGHT_INFO;
@@ -230,7 +235,6 @@ remixapi_LightHandle RTXLightManager::CreateLight(const LightProperties& props, 
         managedLight.handle = result.value();
         managedLight.properties = props;
         managedLight.entityID = entityID;
-        managedLight.lastUpdateTime = GetTickCount64() / 1000.0f;
 
         m_lights.push_back(managedLight);
         m_lightsByEntityID[entityID] = managedLight;
@@ -367,33 +371,16 @@ bool RTXLightManager::UpdateLight(remixapi_LightHandle handle, const LightProper
             return false;
         }
 
-        // Check if update is needed
-        bool needsUpdate = false;
-        const auto& currentProps = lightIt->properties;
-        
-        float posDiff = std::abs(currentProps.x - props.x) + 
-                       std::abs(currentProps.y - props.y) + 
-                       std::abs(currentProps.z - props.z);
-        
-        needsUpdate = posDiff > 0.01f || 
-                     currentProps.size != props.size ||
-                     currentProps.brightness != props.brightness ||
-                     currentProps.r != props.r ||
-                     currentProps.g != props.g ||
-                     currentProps.b != props.b;
+        // Destroy existing light
+        m_remix->DestroyLight(handle);
+        lightIt->handle = nullptr;
 
-        if (!needsUpdate) {
-            LeaveCriticalSection(&m_lightCS);
-            return true;
-        }
-
-        // Update the light
+        // Create new light info
         auto sphereLight = remixapi_LightInfoSphereEXT{};
         sphereLight.sType = REMIXAPI_STRUCT_TYPE_LIGHT_INFO_SPHERE_EXT;
         sphereLight.position = {props.x, props.y, props.z};
         sphereLight.radius = props.size;
         sphereLight.shaping_hasvalue = false;
-        memset(&sphereLight.shaping_value, 0, sizeof(sphereLight.shaping_value));
 
         auto lightInfo = remixapi_LightInfo{};
         lightInfo.sType = REMIXAPI_STRUCT_TYPE_LIGHT_INFO;
@@ -412,15 +399,13 @@ bool RTXLightManager::UpdateLight(remixapi_LightHandle handle, const LightProper
             return false;
         }
 
-        // Update handles and properties
-        auto newLightHandle = result.value();
-        m_remix->DestroyLight(lightIt->handle);
-        lightIt->handle = newLightHandle;
+        // Update state
+        lightIt->handle = result.value();
         lightIt->properties = props;
         lightIt->properties.hash = lightInfo.hash;
 
         if (newHandle) {
-            *newHandle = newLightHandle;
+            *newHandle = lightIt->handle;
         }
 
         LeaveCriticalSection(&m_lightCS);
@@ -434,40 +419,36 @@ bool RTXLightManager::UpdateLight(remixapi_LightHandle handle, const LightProper
 }
 
 void RTXLightManager::DestroyLight(remixapi_LightHandle handle) {
-    if (!handle) return;
-
-    {
-        std::lock_guard<std::mutex> lock(m_handleMutex);
-        auto it = m_activeHandles.find(handle);
-        if (it != m_activeHandles.end()) {
-            m_activeHandles.erase(it);
-        }
-    }
+    if (!handle || !m_initialized || !m_remix) return;
 
     EnterCriticalSection(&m_lightCS);
+    
     try {
-        // Remove from entity tracking
-        for (auto it = m_lightsByEntityID.begin(); it != m_lightsByEntityID.end();) {
-            if (it->second.handle == handle) {
-                it = m_lightsByEntityID.erase(it);
-            } else {
-                ++it;
-            }
-        }
-
-        // Remove from lights list
-        auto it = std::remove_if(m_lights.begin(), m_lights.end(),
+        // Find and remove from both containers
+        auto lightIt = std::find_if(m_lights.begin(), m_lights.end(),
             [handle](const ManagedLight& light) { return light.handle == handle; });
-        m_lights.erase(it, m_lights.end());
 
-        // Destroy the light in Remix
-        if (m_remix) {
+        if (lightIt != m_lights.end()) {
+            // Remove from entity map
+            auto entityIt = m_lightsByEntityID.find(lightIt->entityID);
+            if (entityIt != m_lightsByEntityID.end()) {
+                m_lightsByEntityID.erase(entityIt);
+            }
+
+            // Destroy the light
             m_remix->DestroyLight(handle);
+            
+            // Remove from lights vector
+            m_lights.erase(lightIt);
+            
+            LogMessage("Successfully destroyed light handle: %p (Total lights: %d)\n", 
+                handle, m_lights.size());
         }
     }
     catch (...) {
         LogMessage("Exception in DestroyLight\n");
     }
+
     LeaveCriticalSection(&m_lightCS);
 }
 
