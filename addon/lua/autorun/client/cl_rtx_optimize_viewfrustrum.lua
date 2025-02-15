@@ -43,6 +43,59 @@ local SPECIAL_ENTITY_BOUNDS = {
     }
 }
 
+local function CreateStaticProps()
+    -- Clear existing static props
+    for _, prop in pairs(staticProps) do
+        if IsValid(prop) then
+            prop:Remove()
+        end
+    end
+    staticProps = {}
+
+    if cv_enabled:GetBool() and NikNaks and NikNaks.CurrentMap then
+        local regularSize = math.min(cv_static_regular_bounds:GetFloat(), 8192) -- Cap maximum size
+        local props = NikNaks.CurrentMap:GetStaticProps()
+        
+        -- Pre-calculate bounds vectors
+        local smallBounds = Vector(1024, 0, 0)  -- For small props
+        local mediumBounds = Vector(2048, 0, 0) -- For medium props
+        local largeBounds = Vector(regularSize, 0, 0) -- For large props
+        
+        for _, propData in pairs(props) do
+            local prop = ClientsideModel(propData:GetModel())
+            if IsValid(prop) then
+                prop:SetPos(propData:GetPos())
+                prop:SetAngles(propData:GetAngles())
+                
+                -- Determine bounds based on model size
+                local mins, maxs = prop:GetModelBounds()
+                if mins and maxs then
+                    local size = maxs.x - mins.x
+                    -- Use appropriate bounds based on model size
+                    if size < 256 then
+                        prop:SetRenderBounds(-smallBounds, smallBounds)
+                    elseif size < 1024 then
+                        prop:SetRenderBounds(-mediumBounds, mediumBounds)
+                    else
+                        prop:SetRenderBounds(-largeBounds, largeBounds)
+                    end
+                else
+                    -- Fallback to medium bounds if we can't determine size
+                    prop:SetRenderBounds(-mediumBounds, mediumBounds)
+                end
+                
+                prop:SetColor(propData:GetColor())
+                prop:SetModelScale(propData:GetScale())
+                table.insert(staticProps, prop)
+            end
+        end
+        
+        if cv_debug:GetBool() then
+            print(string.format("[RTX Fixes] Created %d static props using tiered bounds system", #staticProps))
+        end
+    end
+end
+
 -- Helper function to identify RTX updaters
 local function IsRTXUpdater(ent)
     if not IsValid(ent) then return false end
@@ -118,14 +171,39 @@ hook.Add("InitPostEntity", "InitialBoundsSetup", function()
     timer.Simple(1, function()
         if cv_enabled:GetBool() then
             UpdateAllEntities()
+            CreateStaticProps()
         end
     end)
+end)
+
+hook.Add("OnReloaded", "RefreshStaticProps", function()
+    -- Remove existing static props
+    for _, prop in pairs(staticProps) do
+        if IsValid(prop) then
+            prop:Remove()
+        end
+    end
+    staticProps = {}
+    
+    -- Recreate if enabled
+    if cv_enabled:GetBool() then
+        timer.Simple(1, CreateStaticProps)
+    end
 end)
 
 -- Handle enable/disable
 cvars.AddChangeCallback("fr_enabled", function(_, _, new)
     if tobool(new) then
         UpdateAllEntities()
+        CreateStaticProps()
+    else
+        -- Remove static props when disabled
+        for _, prop in pairs(staticProps) do
+            if IsValid(prop) then
+                prop:Remove()
+            end
+        end
+        staticProps = {}
     end
 end)
 
@@ -187,6 +265,12 @@ local function ApplyBoundsChange()
     end
 end
 
-cvars.AddChangeCallback("fr_static_regular_bounds", function() ApplyBoundsChange() end)
+cvars.AddChangeCallback("fr_static_regular_bounds", function()
+    if cv_enabled:GetBool() then
+        UpdateAllEntities()
+        CreateStaticProps() -- Recreate static props with new bounds
+    end
+end)
+
 cvars.AddChangeCallback("fr_static_rtx_bounds", function() ApplyBoundsChange() end)
 cvars.AddChangeCallback("fr_static_env_bounds", function() ApplyBoundsChange() end)
