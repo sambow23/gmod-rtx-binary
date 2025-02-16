@@ -10,7 +10,7 @@ local cv_debug = CreateClientConVar("fr_debug_messages", "0", true, false, "Enab
 -- Disable engine static props since we're creating our own
 RunConsoleCommand("r_drawstaticprops", "0")
 
--- RTX Light Updater model list
+-- Light Updater model list
 local RTX_UPDATER_MODELS = {
     ["models/hunter/plates/plate.mdl"] = true,
     ["models/hunter/blocks/cube025x025x025.mdl"] = true
