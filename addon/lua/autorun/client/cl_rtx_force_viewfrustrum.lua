@@ -260,7 +260,7 @@ local function CreateSettingsPanel(panel)
     boundsForm:SetName("Static Bounds Settings")
     
     -- Add preset dropdown
-    local presetCombo = boundsForm:ComboBox("Presets", "fr_preset")
+    local presetCombo = boundsForm:ComboBox("Preset", "fr_preset")
     presetCombo:SetSortItems(false) -- Disable automatic sorting
     
     -- Clear any existing choices
@@ -312,18 +312,6 @@ local function CreateSettingsPanel(panel)
             ApplyPreset(presetName)
         end
     end)
-    
-    local refreshBtn = boundsForm:Button("Apply Bounds")
-    function refreshBtn:DoClick()
-        if cv_enabled:GetBool() then
-            UpdateAllEntities()
-            surface.PlaySound("buttons/button14.wav")
-        end
-    end
-    
-    panel:Help("\nDebug Settings")
-    panel:CheckBox("Show Debug Messages", "fr_debug_messages")
-    panel:ControlHelp("Show detailed debug messages in console")
 end
 
 -- Add to Utilities menu
