@@ -70,6 +70,8 @@ local PRESETS = {
     }
 }
 
+local MAP_PRESETS = {}
+
 local function CreateStaticProps()
     -- Clear existing static props
     for _, prop in pairs(staticProps) do
@@ -182,6 +184,58 @@ local function UpdateAllEntities()
     end
 end
 
+local function LoadMapPresets()
+    local saved = util.JSONToTable(file.Read("rtx_map_presets.txt", "DATA") or "{}") or {}
+    MAP_PRESETS = saved
+    if cv_debug:GetBool() then
+        print("[RTX Fixes] Loaded map presets:", table.Count(MAP_PRESETS), "entries")
+    end
+end
+
+-- Save map presets
+local function SaveMapPresets()
+    file.Write("rtx_map_presets.txt", util.TableToJSON(MAP_PRESETS, true))
+    if cv_debug:GetBool() then
+        print("[RTX Fixes] Saved map presets")
+    end
+end
+
+-- Get current map name
+local function GetCurrentMap()
+    return game.GetMap():lower()
+end
+
+-- Function to apply a specific preset
+local function ApplyPreset(presetName)
+    local preset = PRESETS[presetName]
+    if preset then
+        RunConsoleCommand("fr_static_regular_bounds", tostring(preset.regular))
+        RunConsoleCommand("fr_static_rtx_bounds", tostring(preset.rtx))
+        RunConsoleCommand("fr_static_env_bounds", tostring(preset.env))
+        
+        if cv_debug:GetBool() then
+            print(string.format("[RTX Fixes] Applied preset: %s (Regular: %d, RTX: %d, Env: %d)", 
+                presetName, preset.regular, preset.rtx, preset.env))
+        end
+        
+        -- Update entities with new bounds
+        UpdateAllEntities()
+        CreateStaticProps()
+    end
+end
+
+-- Apply preset for current map
+local function ApplyMapPreset()
+    local currentMap = GetCurrentMap()
+    local preset = MAP_PRESETS[currentMap] or "Low" -- Default to Low if no preset is set
+    
+    if cv_debug:GetBool() then
+        print(string.format("[RTX Fixes] Applying map preset: %s for map: %s", preset, currentMap))
+    end
+    
+    ApplyPreset(preset)
+end
+
 -- Hook for new entities
 hook.Add("OnEntityCreated", "SetLargeRenderBounds", function(ent)
     if not IsValid(ent) then return end
@@ -260,40 +314,22 @@ local function CreateSettingsPanel(panel)
     boundsForm:SetName("Static Bounds Settings")
     
     -- Add preset dropdown
-    local presetCombo = boundsForm:ComboBox("Preset", "fr_preset")
-    presetCombo:SetSortItems(false) -- Disable automatic sorting
-    
-    -- Clear any existing choices
+    local presetCombo = boundsForm:ComboBox("Presets", "fr_preset")
+    presetCombo:SetSortItems(false)
     presetCombo:Clear()
     
-    -- Add choices in specific order
     for i, presetName in ipairs(PRESET_ORDER) do
-        presetCombo:AddChoice(presetName, nil, i == 1) -- The third parameter (i == 1) sets the default selection
+        presetCombo:AddChoice(presetName, nil, i == 1)
     end
     
     presetCombo:SetValue("Select a preset...")
-    
-    -- Function to apply preset
-    local function ApplyPreset(presetName)
-        local preset = PRESETS[presetName]
-        if preset then
-            RunConsoleCommand("fr_static_regular_bounds", tostring(preset.regular))
-            RunConsoleCommand("fr_static_rtx_bounds", tostring(preset.rtx))
-            RunConsoleCommand("fr_static_env_bounds", tostring(preset.env))
-            surface.PlaySound("buttons/button14.wav")
-            
-            if cv_debug:GetBool() then
-                print(string.format("[RTX Fixes] Applied preset: %s", presetName))
-            end
-        end
-    end
     
     -- Handle preset selection
     function presetCombo:OnSelect(index, value)
         ApplyPreset(value)
     end
     
-    boundsForm:Help("The static bounds settings dictate how far entities should be culled around the player.")
+    boundsForm:Help("The static render bounds dictate how far entities should be culled around the player.")
     boundsForm:Help("The higher the values, the further they cull, at the cost of performance depending on the map.")
     
     local regularSlider = boundsForm:NumSlider("Regular Entity Bounds", "fr_static_regular_bounds", 256, 32000, 0)
@@ -305,14 +341,90 @@ local function CreateSettingsPanel(panel)
     local envSlider = boundsForm:NumSlider("Environment Light Bounds", "fr_static_env_bounds", 16384, 65536, 0)
     envSlider:SetTooltip("Size of render bounds for environment lights")
     
-    -- Add ConCommand to apply presets via console
-    concommand.Add("fr_apply_preset", function(ply, cmd, args)
-        if args[1] then
-            local presetName = string.gsub(args[1], "_", " ") -- Convert underscores to spaces
-            ApplyPreset(presetName)
+    -- Add map preset management
+    boundsForm:Help("\nMap Preset Management")
+    
+    -- Map list
+    local mapList = vgui.Create("DListView", boundsForm)
+    mapList:SetHeight(150)
+    mapList:AddColumn("Map")
+    mapList:AddColumn("Preset")
+    
+    -- Populate map list
+    local function RefreshMapList()
+        mapList:Clear()
+        for mapname, preset in pairs(MAP_PRESETS) do
+            mapList:AddLine(mapname, preset)
         end
-    end)
+    end
+    
+    RefreshMapList()
+    
+    -- Add map button
+    local addBtn = vgui.Create("DButton", boundsForm)
+    addBtn:SetText("Add Current Map")
+    addBtn:SetSize(150, 25)
+    
+    function addBtn:DoClick()
+        local currentMap = GetCurrentMap()
+        local selectedPreset = presetCombo:GetValue()
+        
+        if selectedPreset and selectedPreset ~= "Select a preset..." then
+            MAP_PRESETS[currentMap] = selectedPreset
+            SaveMapPresets()
+            RefreshMapList()
+            surface.PlaySound("buttons/button14.wav")
+        end
+    end
+    
+    -- Remove map button
+    local removeBtn = vgui.Create("DButton", boundsForm)
+    removeBtn:SetText("Remove Selected")
+    removeBtn:SetSize(150, 25)
+    
+    function removeBtn:DoClick()
+        local selected = mapList:GetSelected()
+        if #selected > 0 then
+            local mapname = selected[1]:GetValue(1)
+            MAP_PRESETS[mapname] = nil
+            SaveMapPresets()
+            RefreshMapList()
+            surface.PlaySound("buttons/button14.wav")
+        end
+    end
+    
+    -- Add buttons to form
+    local buttonPanel = vgui.Create("DPanel", boundsForm)
+    buttonPanel:SetHeight(30)
+    buttonPanel:Dock(TOP)
+    buttonPanel.Paint = function() end
+    
+    addBtn:SetParent(buttonPanel)
+    addBtn:Dock(LEFT)
+    addBtn:DockMargin(0, 0, 5, 0)
+    
+    removeBtn:SetParent(buttonPanel)
+    removeBtn:Dock(LEFT)
+    
+    boundsForm:AddItem(mapList)
+    boundsForm:AddItem(buttonPanel)
 end
+
+hook.Add("Initialize", "LoadRTXMapPresets", LoadMapPresets)
+
+-- Apply map preset when joining a map
+hook.Add("InitPostEntity", "ApplyRTXMapPreset", function()
+    timer.Simple(1, function()
+        ApplyMapPreset()
+    end)
+end)
+
+-- Apply map preset when changing maps
+hook.Add("OnGamemodeLoaded", "ApplyRTXMapPreset", function()
+    timer.Simple(1, function()
+        ApplyMapPreset()
+    end)
+end)
 
 -- Add to Utilities menu
 hook.Add("PopulateToolMenu", "RTXFrustumOptimizationMenu", function()
