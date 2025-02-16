@@ -2,8 +2,8 @@ if not CLIENT then return end
 
 -- ConVars - Only keeping static mode options
 local cv_enabled = CreateClientConVar("fr_enabled", "1", true, false, "Enable large render bounds for all entities")
-local cv_static_regular_bounds = CreateClientConVar("fr_static_regular_bounds", "4096", true, false, "Size of static render bounds for regular entities")
-local cv_static_rtx_bounds = CreateClientConVar("fr_static_rtx_bounds", "2048", true, false, "Size of static render bounds for RTX lights")
+local cv_static_regular_bounds = CreateClientConVar("fr_static_regular_bounds", "256", true, false, "Size of static render bounds for regular entities")
+local cv_static_rtx_bounds = CreateClientConVar("fr_static_rtx_bounds", "256", true, false, "Size of static render bounds for RTX lights")
 local cv_static_env_bounds = CreateClientConVar("fr_static_env_bounds", "32768", true, false, "Size of static render bounds for environment lights")
 local cv_debug = CreateClientConVar("fr_debug_messages", "0", true, false, "Enable debug messages for view frustum forcing")
 
@@ -43,6 +43,30 @@ local SPECIAL_ENTITY_BOUNDS = {
     ["prop_door_rotating"] = {
         size = 256,
         description = "Door entities",
+    }
+}
+
+local PRESET_ORDER = {"Low", "Medium", "High", "Very High"}
+local PRESETS = {
+    ["Low"] = {
+        regular = 256,
+        rtx = 256,
+        env = 32768
+    },
+    ["Medium"] = {
+        regular = 1024,
+        rtx = 256,
+        env = 32768
+    },
+    ["High"] = {
+        regular = 4096,
+        rtx = 1024,
+        env = 32768
+    },
+    ["Very High"] = {
+        regular = 8096,
+        rtx = 2048,
+        env = 32768
     }
 }
 
@@ -235,6 +259,43 @@ local function CreateSettingsPanel(panel)
     boundsForm:Dock(TOP)
     boundsForm:SetName("Static Bounds Settings")
     
+    -- Add preset dropdown
+    local presetCombo = boundsForm:ComboBox("Presets", "fr_preset")
+    presetCombo:SetSortItems(false) -- Disable automatic sorting
+    
+    -- Clear any existing choices
+    presetCombo:Clear()
+    
+    -- Add choices in specific order
+    for i, presetName in ipairs(PRESET_ORDER) do
+        presetCombo:AddChoice(presetName, nil, i == 1) -- The third parameter (i == 1) sets the default selection
+    end
+    
+    presetCombo:SetValue("Select a preset...")
+    
+    -- Function to apply preset
+    local function ApplyPreset(presetName)
+        local preset = PRESETS[presetName]
+        if preset then
+            RunConsoleCommand("fr_static_regular_bounds", tostring(preset.regular))
+            RunConsoleCommand("fr_static_rtx_bounds", tostring(preset.rtx))
+            RunConsoleCommand("fr_static_env_bounds", tostring(preset.env))
+            surface.PlaySound("buttons/button14.wav")
+            
+            if cv_debug:GetBool() then
+                print(string.format("[RTX Fixes] Applied preset: %s", presetName))
+            end
+        end
+    end
+    
+    -- Handle preset selection
+    function presetCombo:OnSelect(index, value)
+        ApplyPreset(value)
+    end
+    
+    boundsForm:Help("The presets dictate how far entities should be culled around the player.")
+    boundsForm:Help("The higher the values, the further they cull, at the cost of performance depending on the map.")
+    
     local regularSlider = boundsForm:NumSlider("Regular Entity Bounds", "fr_static_regular_bounds", 256, 32000, 0)
     regularSlider:SetTooltip("Size of render bounds for regular entities")
     
@@ -243,6 +304,14 @@ local function CreateSettingsPanel(panel)
     
     local envSlider = boundsForm:NumSlider("Environment Light Bounds", "fr_static_env_bounds", 16384, 65536, 0)
     envSlider:SetTooltip("Size of render bounds for environment lights")
+    
+    -- Add ConCommand to apply presets via console
+    concommand.Add("fr_apply_preset", function(ply, cmd, args)
+        if args[1] then
+            local presetName = string.gsub(args[1], "_", " ") -- Convert underscores to spaces
+            ApplyPreset(presetName)
+        end
+    end)
     
     local refreshBtn = boundsForm:Button("Apply Bounds")
     function refreshBtn:DoClick()
