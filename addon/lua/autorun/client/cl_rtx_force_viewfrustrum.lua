@@ -322,7 +322,7 @@ local function CreateSettingsPanel(panel)
     boundsForm:SetName("Static Bounds Settings")
     
     -- Add preset dropdown
-    local presetCombo = boundsForm:ComboBox("Presets", "fr_preset")
+    local presetCombo = boundsForm:ComboBox("Presets")
     presetCombo:SetSortItems(false)
     presetCombo:Clear()
     
