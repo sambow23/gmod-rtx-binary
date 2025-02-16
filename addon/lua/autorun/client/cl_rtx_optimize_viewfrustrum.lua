@@ -7,6 +7,9 @@ local cv_static_rtx_bounds = CreateClientConVar("fr_static_rtx_bounds", "2048", 
 local cv_static_env_bounds = CreateClientConVar("fr_static_env_bounds", "32768", true, false, "Size of static render bounds for environment lights")
 local cv_debug = CreateClientConVar("fr_debug_messages", "0", true, false, "Enable debug messages for RTX view frustum optimization")
 
+-- Disable engine static props since we're creating our own
+RunConsoleCommand("r_drawstaticprops", "0")
+
 -- RTX Light Updater model list
 local RTX_UPDATER_MODELS = {
     ["models/hunter/plates/plate.mdl"] = true,
@@ -170,6 +173,7 @@ end)
 hook.Add("InitPostEntity", "InitialBoundsSetup", function()
     timer.Simple(1, function()
         if cv_enabled:GetBool() then
+            RunConsoleCommand("r_drawstaticprops", "0") -- Ensure engine props are disabled
             UpdateAllEntities()
             CreateStaticProps()
         end
@@ -194,9 +198,11 @@ end)
 -- Handle enable/disable
 cvars.AddChangeCallback("fr_enabled", function(_, _, new)
     if tobool(new) then
+        RunConsoleCommand("r_drawstaticprops", "0") -- Disable engine props when enabled
         UpdateAllEntities()
         CreateStaticProps()
     else
+        RunConsoleCommand("r_drawstaticprops", "1") -- Re-enable engine props when disabled
         -- Remove static props when disabled
         for _, prop in pairs(staticProps) do
             if IsValid(prop) then
