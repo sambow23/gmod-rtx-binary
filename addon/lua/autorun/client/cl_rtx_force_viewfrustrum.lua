@@ -66,7 +66,7 @@ local PRESETS = {
     ["Very High"] = {
         regular = 8096,
         rtx = 2048,
-        env = 32768
+        env = 65536
     }
 }
 
