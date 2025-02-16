@@ -5,7 +5,7 @@ local cv_enabled = CreateClientConVar("fr_enabled", "1", true, false, "Enable la
 local cv_static_regular_bounds = CreateClientConVar("fr_static_regular_bounds", "4096", true, false, "Size of static render bounds for regular entities")
 local cv_static_rtx_bounds = CreateClientConVar("fr_static_rtx_bounds", "2048", true, false, "Size of static render bounds for RTX lights")
 local cv_static_env_bounds = CreateClientConVar("fr_static_env_bounds", "32768", true, false, "Size of static render bounds for environment lights")
-local cv_debug = CreateClientConVar("fr_debug_messages", "0", true, false, "Enable debug messages for RTX view frustum optimization")
+local cv_debug = CreateClientConVar("fr_debug_messages", "0", true, false, "Enable debug messages for view frustum forcing")
 
 -- Disable engine static props since we're creating our own
 RunConsoleCommand("r_drawstaticprops", "0")
@@ -226,7 +226,7 @@ local function CreateSettingsPanel(panel)
     panel:ClearControls()
     
     panel:CheckBox("Enable Static Render Bounds", "fr_enabled")
-    panel:ControlHelp("Enables optimized static render bounds for all entities")
+    panel:ControlHelp("Enables forced static render bounds for all entities")
     
     panel:Help("")
     
@@ -238,7 +238,7 @@ local function CreateSettingsPanel(panel)
     local regularSlider = boundsForm:NumSlider("Regular Entity Bounds", "fr_static_regular_bounds", 256, 32000, 0)
     regularSlider:SetTooltip("Size of render bounds for regular entities")
     
-    local rtxSlider = boundsForm:NumSlider("RTX Light Bounds", "fr_static_rtx_bounds", 256, 32000, 0)
+    local rtxSlider = boundsForm:NumSlider("Standard Light Bounds", "fr_static_rtx_bounds", 256, 32000, 0)
     rtxSlider:SetTooltip("Size of render bounds for RTX lights")
     
     local envSlider = boundsForm:NumSlider("Environment Light Bounds", "fr_static_env_bounds", 16384, 65536, 0)
