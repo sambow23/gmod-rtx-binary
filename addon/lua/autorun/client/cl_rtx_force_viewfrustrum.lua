@@ -293,7 +293,7 @@ local function CreateSettingsPanel(panel)
         ApplyPreset(value)
     end
     
-    boundsForm:Help("The presets dictate how far entities should be culled around the player.")
+    boundsForm:Help("The static bounds settings dictate how far entities should be culled around the player.")
     boundsForm:Help("The higher the values, the further they cull, at the cost of performance depending on the map.")
     
     local regularSlider = boundsForm:NumSlider("Regular Entity Bounds", "fr_static_regular_bounds", 256, 32000, 0)
