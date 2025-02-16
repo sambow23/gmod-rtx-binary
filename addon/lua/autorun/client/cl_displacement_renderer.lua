@@ -17,6 +17,51 @@ local dispMeshes = {
     translucent = {}
 }
 
+-- Cache for shared vertices between displacement patches
+local dispVertexCache = {}
+
+local function GetCacheKey(pos)
+    -- Use higher precision for edge matching
+    local precision = 10000 -- 4 decimal places
+    local x = math.floor(pos.x * precision + 0.5) / precision
+    local y = math.floor(pos.y * precision + 0.5) / precision
+    local z = math.floor(pos.z * precision + 0.5) / precision
+    return string.format("%.4f,%.4f,%.4f", x, y, z)
+end
+
+local function FindNeighboringDisplacements(face, faces)
+    local neighbors = {}
+    local pos = face:GetVertexs()
+    if not pos then return neighbors end
+    
+    -- Find neighbors by checking shared vertices
+    for _, otherFace in ipairs(faces) do
+        if otherFace == face or not otherFace:IsDisplacement() then continue end
+        
+        local otherPos = otherFace:GetVertexs()
+        if not otherPos then continue end
+        
+        -- Check if faces share any vertices
+        local sharedVerts = 0
+        for _, v1 in ipairs(pos) do
+            for _, v2 in ipairs(otherPos) do
+                -- Compare positions with some tolerance
+                if v1:DistToSqr(v2) < 0.1 then
+                    sharedVerts = sharedVerts + 1
+                    break
+                end
+            end
+        end
+        
+        -- If faces share 2 or more vertices, they're neighbors
+        if sharedVerts >= 2 then
+            table.insert(neighbors, otherFace)
+        end
+    end
+    
+    return neighbors
+end
+
 local function GenerateDispMesh(face)
     if not face:IsDisplacement() then return nil end
     
@@ -25,40 +70,64 @@ local function GenerateDispMesh(face)
     
     if not verts or #verts ~= 4 then return nil end
 
-    -- Get displacement data
     local power = dispInfo.power
     local numSegments = 2^power
-    local vertexCount = (numSegments + 1) * (numSegments + 1)
     
-    -- Get texture data for proper scaling
+    -- Get texture data
     local texInfo = face:GetTexInfo()
     local texData = face:GetTexData()
     local textureWidth = texData.width
     local textureHeight = texData.height
+
+    -- Start position is crucial for proper alignment
+    local startPosition = dispInfo.startPosition
     
-    -- Generate grid of vertices
+    -- Generate vertices
     local vertices = {}
     local dispVerts = NikNaks.CurrentMap:GetDispVerts()
     local startVert = dispInfo.DispVertStart
     
+    -- Find the correct starting corner by matching startPosition
+    local cornerOrder = {1, 2, 3, 4}
+    local bestDist = math.huge
+    local bestCorner = 1
+    for i, v in ipairs(verts) do
+        local dist = v:DistToSqr(startPosition)
+        if dist < bestDist then
+            bestDist = dist
+            bestCorner = i
+        end
+    end
+    
+    -- Reorder corners to start from the correct position
+    local orderedVerts = {}
+    for i = 1, 4 do
+        local idx = ((bestCorner + i - 2) % 4) + 1
+        orderedVerts[i] = verts[idx]
+    end
+    
+    -- Generate displacement grid
     for i = 0, numSegments do
-        local t1 = i / numSegments
+        local alphaU = i / numSegments
         for j = 0, numSegments do
-            local t2 = j / numSegments
+            local alphaV = j / numSegments
             
-            -- Get base position by bilinear interpolation of corners
-            local basePos = LerpVector(t2, 
-                              LerpVector(t1, verts[1], verts[2]), 
-                              LerpVector(t1, verts[4], verts[3]))
+            -- Calculate base position using bilinear interpolation
+            local top = LerpVector(alphaU, orderedVerts[1], orderedVerts[2])
+            local bottom = LerpVector(alphaU, orderedVerts[4], orderedVerts[3])
+            local basePos = LerpVector(alphaV, top, bottom)
             
-            -- Apply displacement
+            -- Get displacement data
             local dispIndex = startVert + i * (numSegments + 1) + j
             local dispVert = dispVerts[dispIndex]
             if not dispVert then continue end
             
-            local finalPos = basePos + dispVert.vec * dispVert.dist
+            -- Apply displacement precisely
+            local dispVector = dispVert.vec
+            dispVector:Normalize() -- Ensure normalized displacement vector
+            local finalPos = basePos + (dispVector * dispVert.dist)
             
-            -- Generate properly scaled UVs
+            -- Calculate precise UVs using world space
             local u = (texInfo.textureVects[0][0] * finalPos.x + 
                       texInfo.textureVects[0][1] * finalPos.y + 
                       texInfo.textureVects[0][2] * finalPos.z + 
@@ -69,29 +138,42 @@ local function GenerateDispMesh(face)
                       texInfo.textureVects[1][2] * finalPos.z + 
                       texInfo.textureVects[1][3]) / textureHeight
             
-            -- Store the vertex with alpha
+            -- Calculate proper normal
+            local normal = dispVector
+            if i > 0 and i < numSegments and j > 0 and j < numSegments then
+                -- Use cross product of adjacent edges for interior vertices
+                local prevI = vertices[(i-1) * (numSegments + 1) + j + 1]
+                local prevJ = vertices[i * (numSegments + 1) + j]
+                if prevI and prevJ then
+                    local edge1 = prevI.pos - finalPos
+                    local edge2 = prevJ.pos - finalPos
+                    normal = edge1:Cross(edge2)
+                    normal:Normalize()
+                end
+            end
+            
             table_insert(vertices, {
                 pos = finalPos,
-                normal = dispVert.vec,
+                normal = normal,
                 u = u,
                 v = v,
-                alpha = dispVert.alpha / 255  -- Normalize alpha to 0-1 range
+                alpha = dispVert.alpha / 255
             })
         end
     end
-    
-    -- Generate triangles with alpha
+
+    -- Generate triangles with consistent winding
     local triangles = {}
     for i = 0, numSegments - 1 do
         for j = 0, numSegments - 1 do
             local index = i * (numSegments + 1) + j + 1
             
-            -- First triangle (counter-clockwise winding)
+            -- First triangle
             table_insert(triangles, vertices[index])
             table_insert(triangles, vertices[index + numSegments + 1])
             table_insert(triangles, vertices[index + 1])
             
-            -- Second triangle (counter-clockwise winding)
+            -- Second triangle
             table_insert(triangles, vertices[index + 1])
             table_insert(triangles, vertices[index + numSegments + 1])
             table_insert(triangles, vertices[index + numSegments + 2])
@@ -180,13 +262,22 @@ local function RenderDisplacements(translucent)
     end
 end
 
+-- Cleanup function
+local function CleanupDispCache()
+    dispVertexCache = {}
+end
+
 -- Hooks
 hook.Add("InitPostEntity", "DisplacementInit", function()
+    CleanupDispCache()
     BuildDispMeshes()
-    RunConsoleCommand("r_drawdisp", "0") -- Disable engine displacement rendering
+    RunConsoleCommand("r_drawdisp", "0")
 end)
 
-hook.Add("PostCleanupMap", "DisplacementRebuild", BuildDispMeshes)
+hook.Add("PostCleanupMap", "DisplacementRebuild", function()
+    CleanupDispCache()
+    BuildDispMeshes()
+end)
 
 hook.Add("PreDrawOpaqueRenderables", "DisplacementRender", function()
     RenderDisplacements(false)
