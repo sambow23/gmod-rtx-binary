@@ -82,11 +82,59 @@ local function GenerateDispMesh(face)
     -- Start position is crucial for proper alignment
     local startPosition = dispInfo.startPosition
     
-    -- Generate vertices
-    local vertices = {}
-    local dispVerts = NikNaks.CurrentMap:GetDispVerts()
-    local startVert = dispInfo.DispVertStart
-    
+    -- Helper function to compute smooth normal at a vertex
+    local function ComputeSmoothNormal(i, j, vertices, numSegments)
+        local normal = Vector(0, 0, 0)
+        local count = 0
+        
+        -- Sample a larger area around the vertex for smoother normals
+        for di = -1, 1 do
+            for dj = -1, 1 do
+                local ci = i + di
+                local cj = j + dj
+                
+                -- Skip out of bounds indices
+                if ci < 0 or ci >= numSegments or cj < 0 or cj >= numSegments then
+                    continue
+                end
+                
+                -- Get the quad at this position
+                local idx = ci * (numSegments + 1) + cj + 1
+                local v1 = vertices[idx]
+                local v2 = vertices[idx + 1]
+                local v3 = vertices[idx + numSegments + 2]
+                local v4 = vertices[idx + numSegments + 1]
+                
+                if not (v1 and v2 and v3 and v4) then continue end
+                
+                -- Calculate tangent vectors
+                local tangentU = (v2.pos - v1.pos):GetNormalized()
+                local tangentV = (v4.pos - v1.pos):GetNormalized()
+                
+                -- Cross product for normal
+                local faceNormal = tangentU:Cross(tangentV)
+                faceNormal:Normalize()
+                
+                -- Weight based on distance from center
+                local weight = 1.0 - (math.sqrt(di * di + dj * dj) / 2.0)
+                if weight < 0 then weight = 0 end
+                
+                normal:Add(faceNormal * weight)
+                count = count + weight
+            end
+        end
+        
+        if count > 0 then
+            normal:Div(count)
+            normal:Normalize()
+        else
+            -- Fallback if no valid normals were found
+            normal = Vector(0, 0, 1)
+        end
+        
+        return normal
+    end
+
     -- Find the correct starting corner by matching startPosition
     local cornerOrder = {1, 2, 3, 4}
     local bestDist = math.huge
@@ -105,8 +153,13 @@ local function GenerateDispMesh(face)
         local idx = ((bestCorner + i - 2) % 4) + 1
         orderedVerts[i] = verts[idx]
     end
+
+    -- Pre-generate all vertices first without normals
+    local vertices = {}
+    local dispVerts = NikNaks.CurrentMap:GetDispVerts()
+    local startVert = dispInfo.DispVertStart
     
-    -- Generate displacement grid
+    -- Generate vertex positions first
     for i = 0, numSegments do
         local alphaU = i / numSegments
         for j = 0, numSegments do
@@ -122,12 +175,12 @@ local function GenerateDispMesh(face)
             local dispVert = dispVerts[dispIndex]
             if not dispVert then continue end
             
-            -- Apply displacement precisely
+            -- Apply displacement
             local dispVector = dispVert.vec
-            dispVector:Normalize() -- Ensure normalized displacement vector
+            dispVector:Normalize()
             local finalPos = basePos + (dispVector * dispVert.dist)
             
-            -- Calculate precise UVs using world space
+            -- Calculate UVs
             local u = (texInfo.textureVects[0][0] * finalPos.x + 
                       texInfo.textureVects[0][1] * finalPos.y + 
                       texInfo.textureVects[0][2] * finalPos.z + 
@@ -138,31 +191,57 @@ local function GenerateDispMesh(face)
                       texInfo.textureVects[1][2] * finalPos.z + 
                       texInfo.textureVects[1][3]) / textureHeight
             
-            -- Calculate proper normal
-            local normal = dispVector
-            if i > 0 and i < numSegments and j > 0 and j < numSegments then
-                -- Use cross product of adjacent edges for interior vertices
-                local prevI = vertices[(i-1) * (numSegments + 1) + j + 1]
-                local prevJ = vertices[i * (numSegments + 1) + j]
-                if prevI and prevJ then
-                    local edge1 = prevI.pos - finalPos
-                    local edge2 = prevJ.pos - finalPos
-                    normal = edge1:Cross(edge2)
-                    normal:Normalize()
-                end
-            end
-            
-            table_insert(vertices, {
+            vertices[i * (numSegments + 1) + j + 1] = {
                 pos = finalPos,
-                normal = normal,
                 u = u,
                 v = v,
-                alpha = dispVert.alpha / 255
-            })
+                alpha = dispVert.alpha / 255,
+                normal = Vector(0, 0, 0) -- Will be calculated later
+            }
         end
     end
 
-    -- Generate triangles with consistent winding
+    -- Calculate smooth normals for all vertices
+    for i = 0, numSegments do
+        for j = 0, numSegments do
+            local idx = i * (numSegments + 1) + j + 1
+            local vert = vertices[idx]
+            if not vert then continue end
+            
+            -- Compute smooth normal
+            vert.normal = ComputeSmoothNormal(i, j, vertices, numSegments)
+        end
+    end
+
+    -- Special handling for edges to match neighboring displacements
+    local neighbors = FindNeighboringDisplacements(face, NikNaks.CurrentMap:GetDisplacmentFaces())
+    for _, neighbor in ipairs(neighbors) do
+        local neighborVerts = neighbor:GetVertexs()
+        if not neighborVerts then continue end
+        
+        for i = 0, numSegments do
+            for j = 0, numSegments do
+                local idx = i * (numSegments + 1) + j + 1
+                local vert = vertices[idx]
+                if not vert then continue end
+                
+                -- Check if this vertex is on an edge
+                if i == 0 or i == numSegments or j == 0 or j == numSegments then
+                    -- Find closest vertex in neighbor
+                    for _, neighborVert in ipairs(neighborVerts) do
+                        if vert.pos:DistToSqr(neighborVert) < 0.1 then
+                            -- Average normals with neighbor
+                            local neighborNormal = (neighborVert - vert.pos):GetNormalized()
+                            vert.normal = (vert.normal + neighborNormal):GetNormalized()
+                            break
+                        end
+                    end
+                end
+            end
+        end
+    end
+
+    -- Generate triangles
     local triangles = {}
     for i = 0, numSegments - 1 do
         for j = 0, numSegments - 1 do
