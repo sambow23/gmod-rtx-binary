@@ -1,19 +1,16 @@
 if not CLIENT then return end
 
 local function FixupBlankMaterial(mat, filepath)
-	print("[RTX Fixes] - Found and fixing blank material in " .. filepath)
 	local blankmat = Material("debug/particleerror")
 	mat:SetTexture( "$basetexture", blankmat:GetTexture("$basetexture") )
 end
 
 local function FixupGUIMaterial(mat, filepath)
-	print("[RTX Fixes] - Found and fixing vgui material in " .. filepath)
 	local blankmat = Material("rtx/guiwhite")
 	mat:SetTexture( "$basetexture", blankmat:GetTexture("$basetexture") )
 end
 
 local function FixupParticleMaterial(mat, filepath)
-	print("[RTX Fixes] - Found and fixing particle material in " .. filepath)
 	mat:SetInt( "$additive", 1 )
 end
 
