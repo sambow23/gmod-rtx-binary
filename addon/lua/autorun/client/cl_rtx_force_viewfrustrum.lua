@@ -169,7 +169,15 @@ local function SetEntityBounds(ent)
             ent:SetRenderBounds(-bounds, bounds)
         end
         ent:DisableMatrix("RenderMultiply")
-        ent:SetNoDraw(false)
+        
+        -- Use consistent render mode and opacity
+        if GetConVar("rtx_lightupdater_show"):GetBool() then
+            ent:SetRenderMode(0)  // RENDERMODE_NORMAL
+            ent:SetColor(Color(255, 255, 255, 255))
+        else
+            ent:SetRenderMode(2)  // RENDERMODE_TRANSALPHA
+            ent:SetColor(Color(255, 255, 255, 1))
+        end
     -- Regular entities
     else
         local bounds = Vector(regularSize, regularSize, regularSize)
