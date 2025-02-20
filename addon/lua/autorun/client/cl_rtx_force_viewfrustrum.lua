@@ -29,6 +29,7 @@ local timer_Simple = timer.Simple
 local timer_Create = timer.Create
 local timer_Remove = timer.Remove
 local timer_Exists = timer.Exists
+local RTXMath = RTXMath
 
 -- RTX Light Updater model list
 local RTX_UPDATER_MODELS = {
@@ -181,44 +182,78 @@ local function SetEntityBounds(ent, useOriginal)
         if specialBounds then
             local size = specialBounds.size
             local bounds = Vector(size, size, size)
-            ent:SetRenderBounds(-bounds, bounds)
+            local negBounds = Vector(-size, -size, -size)
             
-            -- Debug output if enabled
-            if cv_enabled:GetBool() and cv_debug:GetBool() then
-                print(string.format("[RTX Fixes] Special entity bounds (%s): %d", 
-                    ent:GetClass(), size))
+            -- Use native bounds check for optimization
+            if RTXMath.IsWithinBounds(ent:GetPos(), negBounds, bounds) then
+                ent:SetRenderBounds(negBounds, bounds)
+                
+                -- Debug output if enabled
+                if cv_enabled:GetBool() and cv_debug:GetBool() then
+                    print(string.format("[RTX Fixes] Special entity bounds (%s): %d", 
+                        ent:GetClass(), size))
+                end
             end
+            
         -- Then check other entity types
         elseif ent:GetClass() == "hdri_cube_editor" then
             local hdriSize = 32768
             local hdriBounds = Vector(hdriSize, hdriSize, hdriSize)
-            ent:SetRenderBounds(-hdriBounds, hdriBounds)
-            ent:DisableMatrix("RenderMultiply")
-            ent:SetNoDraw(false)
+            local negHdriBounds = Vector(-hdriSize, -hdriSize, -hdriSize)
+            
+            -- Use native bounds check
+            if RTXMath.IsWithinBounds(ent:GetPos(), negHdriBounds, hdriBounds) then
+                ent:SetRenderBounds(negHdriBounds, hdriBounds)
+                ent:DisableMatrix("RenderMultiply")
+                ent:SetNoDraw(false)
+            end
+            
         elseif rtxUpdaterCache[ent] then
             -- Completely separate handling for environment lights
             if ent.lightType == LIGHT_TYPES.ENVIRONMENT then
                 local envSize = cv_environment_light_distance:GetFloat()
                 local envBounds = Vector(envSize, envSize, envSize)
-                ent:SetRenderBounds(-envBounds, envBounds)
-                -- Only print if debug is enabled
-                if cv_enabled:GetBool() and cv_debug:GetBool() then
-                    print(string.format("[RTX Fixes] Environment light bounds: %d", envSize))
+                local negEnvBounds = Vector(-envSize, -envSize, -envSize)
+                
+                -- Use native bounds and distance check
+                local entPos = ent:GetPos()
+                if RTXMath.IsWithinBounds(entPos, negEnvBounds, envBounds) then
+                    ent:SetRenderBounds(negEnvBounds, envBounds)
+                    
+                    -- Only print if debug is enabled
+                    if cv_enabled:GetBool() and cv_debug:GetBool() then
+                        local distSqr = RTXMath.DistToSqr(entPos, vector_origin)
+                        print(string.format("[RTX Fixes] Environment light bounds: %d (Distance: %.2f)", 
+                            envSize, math.sqrt(distSqr)))
+                    end
                 end
+                
             elseif REGULAR_LIGHT_TYPES[ent.lightType] then
                 local rtxDistance = cv_rtx_updater_distance:GetFloat()
                 local rtxBounds = Vector(rtxDistance, rtxDistance, rtxDistance)
-                ent:SetRenderBounds(-rtxBounds, rtxBounds)
-                -- Only print if debug is enabled
-                if cv_enabled:GetBool() and cv_debug:GetBool() then
-                    print(string.format("[RTX Fixes] Regular light bounds (%s): %d", 
-                        ent.lightType, rtxDistance))
+                local negRtxBounds = Vector(-rtxDistance, -rtxDistance, -rtxDistance)
+                
+                -- Use native bounds and distance check
+                local entPos = ent:GetPos()
+                if RTXMath.IsWithinBounds(entPos, negRtxBounds, rtxBounds) then
+                    ent:SetRenderBounds(negRtxBounds, rtxBounds)
+                    
+                    -- Only print if debug is enabled
+                    if cv_enabled:GetBool() and cv_debug:GetBool() then
+                        local distSqr = RTXMath.DistToSqr(entPos, vector_origin)
+                        print(string.format("[RTX Fixes] Regular light bounds (%s): %d (Distance: %.2f)", 
+                            ent.lightType, rtxDistance, math.sqrt(distSqr)))
+                    end
                 end
             end
+            
             ent:DisableMatrix("RenderMultiply")
             ent:SetNoDraw(false)
         else
-            ent:SetRenderBounds(mins, maxs)
+            -- Default bounds
+            if RTXMath.IsWithinBounds(ent:GetPos(), mins, maxs) then
+                ent:SetRenderBounds(mins, maxs)
+            end
         end
     end
 end
