@@ -11,6 +11,7 @@ local CONVARS = {
 local Vector = Vector
 local table_insert = table.insert
 local math_floor = math.floor
+local RTXMath = RTXMath
 
 local dispMeshes = {
     opaque = {},
