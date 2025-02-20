@@ -94,8 +94,12 @@ end
 local function IsRTXUpdater(ent)
     if not IsValid(ent) then return false end
     local class = ent:GetClass()
-    return SPECIAL_ENTITIES[class] or 
-           (ent:GetModel() and RTX_UPDATER_MODELS[ent:GetModel()] == 1)
+    if SPECIAL_ENTITIES[class] or (ent:GetModel() and RTX_UPDATER_MODELS[ent:GetModel()] == 1) then
+        local distSqr = RTXMath.DistToSqr(ent:GetPos(), LocalPlayer():GetPos())
+        return distSqr <= (cv_rtx_updater_distance:GetFloat() ^ 2)
+    end
+    
+    return false
 end
 
 -- Store original bounds for an entity
@@ -144,6 +148,8 @@ end
 
 local function BatchUpdateRTXBounds(entities, boundsSize)
     local vectorBounds = Vector(boundsSize, boundsSize, boundsSize)
+    local negVectorBounds = Vector(-boundsSize, -boundsSize, -boundsSize) -- Add this line
+    
     -- Process entities in batches of 100 to prevent frame hitches
     local batchSize = 100
     local processed = 0
@@ -153,7 +159,14 @@ local function BatchUpdateRTXBounds(entities, boundsSize)
         for i = processed + 1, endIndex do
             local ent = entities[i]
             if IsValid(ent) then
-                ent:SetRenderBounds(-vectorBounds, vectorBounds)
+                local entPos = ent:GetPos()
+                -- Make sure we have a valid position
+                if entPos then
+                    -- Use native bounds check
+                    if RTXMath.IsWithinBounds(entPos, negVectorBounds, vectorBounds) then
+                        ent:SetRenderBounds(negVectorBounds, vectorBounds)
+                    end
+                end
             end
         end
         processed = endIndex
@@ -286,8 +299,8 @@ local function CreateStaticProps()
         local endIndex = math.min(processed + batchSize, #props)
         for i = processed + 1, endIndex do
             local propData = props[i]
-            -- Distance culling for initial creation
-            if propData:GetPos():DistToSqr(playerPos) <= maxDistanceSqr then
+            -- Use native distance check
+            if RTXMath.DistToSqr(propData:GetPos(), playerPos) <= maxDistanceSqr then
                 local prop = ClientsideModel(propData:GetModel())
                 if IsValid(prop) then
                     prop:SetPos(propData:GetPos())
@@ -422,11 +435,22 @@ cvars.AddChangeCallback("fr_bounds_size", function(_, _, new)
     -- Schedule the update
     timer.Create(boundsUpdateTimer, DEBOUNCE_TIME, 1, function()
         boundsSize = tonumber(new)
-        mins = Vector(-boundsSize, -boundsSize, -boundsSize)
-        maxs = Vector(boundsSize, boundsSize, boundsSize)
+        local newBounds = Vector(boundsSize, boundsSize, boundsSize)
+        local negNewBounds = Vector(-boundsSize, -boundsSize, -boundsSize)
+        
+        -- Pre-validate bounds for all entities
+        local validEnts = {}
+        for _, ent in ipairs(ents.GetAll()) do
+            if IsValid(ent) and RTXMath.IsWithinBounds(ent:GetPos(), negNewBounds, newBounds) then
+                table.insert(validEnts, ent)
+            end
+        end
+        
+        mins = negNewBounds
+        maxs = newBounds
         
         if cv_enabled:GetBool() then
-            UpdateAllEntities(false)
+            BatchUpdateRTXBounds(validEnts, boundsSize)
             CreateStaticProps()
         end
     end)
@@ -531,6 +555,17 @@ concommand.Add("fr_debug", function()
             class, 
             data.size, 
             data.description))
+    end
+    -- Add distance analysis
+    local playerPos = LocalPlayer():GetPos()
+    print("\nDistance Analysis:")
+    for ent in pairs(rtxUpdaterCache) do
+        if IsValid(ent) then
+            local distSqr = RTXMath.DistToSqr(ent:GetPos(), playerPos)
+            print(string.format("  %s: %.2f units", 
+                ent:GetClass(), 
+                math.sqrt(distSqr)))
+        end
     end
 end)
 
