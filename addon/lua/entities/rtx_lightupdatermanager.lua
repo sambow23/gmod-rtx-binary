@@ -26,6 +26,11 @@ local REGULAR_LIGHT_TYPES = {
     [LIGHT_TYPES.DYNAMIC] = true
 }
 
+-- Caches
+local RTXMath = RTXMath -- Cache the reference
+local Vector = Vector
+local IsValid = IsValid
+
 function shuffle(tbl)
     for i = #tbl, 2, -1 do
         local j = math.random(i)
@@ -41,46 +46,17 @@ function TableConcat(t1,t2)
     return t1
 end
 
-function ENT:Initialize() 
-    if (GetConVar( "mat_fullbright" ):GetBool()) then return end
-    print("[RTX Fixes] - Lightupdater Initialised.") 
-    self:SetModel("models/hunter/blocks/cube025x025x025.mdl") 
+function ENT:CreateUpdaters()
+    local playerPos = LocalPlayer():GetPos()
     
-    -- Use consistent render mode and opacity
-    self:SetRenderMode(2)  // RENDERMODE_TRANSALPHA
-    self:SetColor(Color(255, 255, 255, 1))
-    
-    -- Get all lights from the map using NikNaks
-    self.regularLights = {}
-    self.environmentLights = {}
-    
-    if NikNaks and NikNaks.CurrentMap then
-        -- Find and categorize all lights
-        local allLights = {}
-        for _, light in ipairs(NikNaks.CurrentMap:FindByClass("light")) do
-            light.lightType = LIGHT_TYPES.POINT
-            table.insert(allLights, light)
-        end
-        for _, light in ipairs(NikNaks.CurrentMap:FindByClass("light_spot")) do
-            light.lightType = LIGHT_TYPES.SPOT
-            table.insert(allLights, light)
-        end
-        for _, light in ipairs(NikNaks.CurrentMap:FindByClass("light_dynamic")) do
-            light.lightType = LIGHT_TYPES.DYNAMIC
-            table.insert(allLights, light)
-        end
-        for _, light in ipairs(NikNaks.CurrentMap:FindByClass("light_environment")) do
-            light.lightType = LIGHT_TYPES.ENVIRONMENT
-            table.insert(self.environmentLights, light)
-        end
-
-        -- Regular lights get shuffled, environment lights don't
-        self.regularLights = allLights
-    end
-
     -- Create updaters for regular lights
     self.regularUpdaters = {}
     local maxRegularUpdaters = math.min(GetConVar("rtx_lightupdater_count"):GetInt(), #self.regularLights)
+    
+    -- Sort lights by distance before creating updaters
+    table.sort(self.regularLights, function(a, b)
+        return RTXMath.DistToSqr(a.origin, playerPos) < RTXMath.DistToSqr(b.origin, playerPos)
+    end)
     
     for i = 1, maxRegularUpdaters do
         local light = self.regularLights[i]
@@ -92,12 +68,10 @@ function ENT:Initialize()
             updater.lightOrigin = light.origin
             updater:Spawn()
             self.regularUpdaters[i] = updater
-            print(string.format("[RTX Fixes] Created Regular Light Updater %d for %s at %s", 
-                i, light.lightType, tostring(light.origin)))
         end
     end
 
-    -- Create updaters for environment lights (always create these)
+    -- Create updaters for environment lights
     self.environmentUpdaters = {}
     for i, light in ipairs(self.environmentLights) do
         local updater = ents.CreateClientside("rtx_lightupdater")
@@ -107,13 +81,62 @@ function ENT:Initialize()
         updater.lightOrigin = light.origin
         updater:Spawn()
         self.environmentUpdaters[i] = updater
-        print(string.format("[RTX Fixes] Created Environment Light Updater %d at %s", 
-            i, tostring(light.origin)))
+    end
+end
+
+function ENT:Initialize() 
+    if (GetConVar("mat_fullbright"):GetBool()) then return end
+    print("[RTX Fixes] - Lightupdater Initialised.") 
+    self:SetModel("models/hunter/blocks/cube025x025x025.mdl") 
+    
+    self:SetRenderMode(2)
+    self:SetColor(Color(255, 255, 255, 1))
+    
+    -- Get all lights from the map using NikNaks
+    self.regularLights = {}
+    self.environmentLights = {}
+    
+    if NikNaks and NikNaks.CurrentMap then
+        local playerPos = LocalPlayer():GetPos()
+        local envDistance = 32768 -- Maximum distance for environment lights
+        local regularDistance = 4096 -- Regular light distance
+        
+        -- Find and categorize all lights with distance culling
+        local allLights = {}
+        for _, light in ipairs(NikNaks.CurrentMap:FindByClass("light")) do
+            if RTXMath.DistToSqr(light.origin, playerPos) <= (regularDistance * regularDistance) then
+                light.lightType = LIGHT_TYPES.POINT
+                table.insert(allLights, light)
+            end
+        end
+        
+        for _, light in ipairs(NikNaks.CurrentMap:FindByClass("light_spot")) do
+            if RTXMath.DistToSqr(light.origin, playerPos) <= (regularDistance * regularDistance) then
+                light.lightType = LIGHT_TYPES.SPOT
+                table.insert(allLights, light)
+            end
+        end
+        
+        for _, light in ipairs(NikNaks.CurrentMap:FindByClass("light_dynamic")) do
+            if RTXMath.DistToSqr(light.origin, playerPos) <= (regularDistance * regularDistance) then
+                light.lightType = LIGHT_TYPES.DYNAMIC
+                table.insert(allLights, light)
+            end
+        end
+        
+        -- Environment lights use larger distance check
+        for _, light in ipairs(NikNaks.CurrentMap:FindByClass("light_environment")) do
+            if RTXMath.DistToSqr(light.origin, playerPos) <= (envDistance * envDistance) then
+                light.lightType = LIGHT_TYPES.ENVIRONMENT
+                table.insert(self.environmentLights, light)
+            end
+        end
+
+        self.regularLights = allLights
     end
 
-    self.shouldslowupdate = false
-    self.doshuffle = true
-    MovetoPositions(self)
+    -- Create updaters with spatial optimization
+    self:CreateUpdaters()
 end
 
 function MovetoPositions(self)  
