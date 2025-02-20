@@ -94,12 +94,8 @@ end
 local function IsRTXUpdater(ent)
     if not IsValid(ent) then return false end
     local class = ent:GetClass()
-    if SPECIAL_ENTITIES[class] or (ent:GetModel() and RTX_UPDATER_MODELS[ent:GetModel()] == 1) then
-        local distSqr = RTXMath.DistToSqr(ent:GetPos(), LocalPlayer():GetPos())
-        return distSqr <= (cv_rtx_updater_distance:GetFloat() ^ 2)
-    end
-    
-    return false
+    return SPECIAL_ENTITIES[class] or 
+           (ent:GetModel() and RTX_UPDATER_MODELS[ent:GetModel()] == 1)
 end
 
 -- Store original bounds for an entity
@@ -148,8 +144,6 @@ end
 
 local function BatchUpdateRTXBounds(entities, boundsSize)
     local vectorBounds = Vector(boundsSize, boundsSize, boundsSize)
-    local negVectorBounds = Vector(-boundsSize, -boundsSize, -boundsSize) -- Add this line
-    
     -- Process entities in batches of 100 to prevent frame hitches
     local batchSize = 100
     local processed = 0
@@ -159,14 +153,7 @@ local function BatchUpdateRTXBounds(entities, boundsSize)
         for i = processed + 1, endIndex do
             local ent = entities[i]
             if IsValid(ent) then
-                local entPos = ent:GetPos()
-                -- Make sure we have a valid position
-                if entPos then
-                    -- Use native bounds check
-                    if RTXMath.IsWithinBounds(entPos, negVectorBounds, vectorBounds) then
-                        ent:SetRenderBounds(negVectorBounds, vectorBounds)
-                    end
-                end
+                ent:SetRenderBounds(-vectorBounds, vectorBounds)
             end
         end
         processed = endIndex
@@ -299,7 +286,7 @@ local function CreateStaticProps()
         local endIndex = math.min(processed + batchSize, #props)
         for i = processed + 1, endIndex do
             local propData = props[i]
-            -- Use native distance check
+            -- Distance culling for initial creation
             if RTXMath.DistToSqr(propData:GetPos(), playerPos) <= maxDistanceSqr then
                 local prop = ClientsideModel(propData:GetModel())
                 if IsValid(prop) then
@@ -326,40 +313,109 @@ local function CreateStaticProps()
     CreatePropBatch()
 end
 
+local function GroupEntitiesByDistance()
+    local groups = {
+        near = {},    -- Within regular bounds
+        medium = {},  -- Within RTX light bounds
+        far = {}      -- Within environment light bounds
+    }
+    
+    local playerPos = LocalPlayer():GetPos()
+    
+    for _, ent in ipairs(ents.GetAll()) do
+        if IsValid(ent) then
+            local distSqr = RTXMath.DistToSqr(ent:GetPos(), playerPos)
+            
+            if distSqr <= (cv_bounds_size:GetFloat() ^ 2) then
+                table.insert(groups.near, ent)
+            elseif distSqr <= (cv_rtx_updater_distance:GetFloat() ^ 2) then
+                table.insert(groups.medium, ent)
+            else
+                table.insert(groups.far, ent)
+            end
+        end
+    end
+    
+    return groups
+end
+
 -- Update all entities
 local function UpdateAllEntities(useOriginal)
     local entities = ents.GetAll()
+    local playerPos = LocalPlayer():GetPos()
+    
     if useOriginal then
         -- Batch process original bounds restoration
         local boundsEntities = {}
         for _, ent in ipairs(entities) do
-            if originalBounds[ent] then
-                table.insert(boundsEntities, ent)
+            if originalBounds[ent] and IsValid(ent) then
+                local entPos = ent:GetPos()
+                if entPos and RTXMath.DistToSqr(entPos, playerPos) <= (cv_bounds_size:GetFloat() ^ 2) then
+                    table.insert(boundsEntities, ent)
+                end
             end
         end
         BatchUpdateRTXBounds(boundsEntities, cv_bounds_size:GetFloat())
     else
-        -- Separate entities by type for optimized processing
+        -- Separate entities by type for optimized processing using distance-based culling
         local regularEnts = {}
         local rtxUpdaters = {}
         local envLights = {}
         
+        -- Pre-calculate distance thresholds
+        local regularDistSqr = cv_bounds_size:GetFloat() ^ 2
+        local rtxDistSqr = cv_rtx_updater_distance:GetFloat() ^ 2
+        local envDistSqr = cv_environment_light_distance:GetFloat() ^ 2
+        
         for _, ent in ipairs(entities) do
-            if rtxUpdaterCache[ent] then
-                if ent.lightType == LIGHT_TYPE_STRINGS[LIGHT_TYPES.ENVIRONMENT] then
-                    table.insert(envLights, ent)
+            if IsValid(ent) then
+                local entPos = ent:GetPos()
+                if not entPos then continue end
+                
+                local distSqr = RTXMath.DistToSqr(entPos, playerPos)
+                
+                if rtxUpdaterCache[ent] then
+                    if ent.lightType == LIGHT_TYPE_STRINGS[LIGHT_TYPES.ENVIRONMENT] then
+                        -- Environment lights have the largest range
+                        if distSqr <= envDistSqr then
+                            table.insert(envLights, ent)
+                        end
+                    else
+                        -- Regular RTX updaters
+                        if distSqr <= rtxDistSqr then
+                            table.insert(rtxUpdaters, ent)
+                        end
+                    end
                 else
-                    table.insert(rtxUpdaters, ent)
+                    -- Regular entities have the smallest range
+                    if distSqr <= regularDistSqr then
+                        table.insert(regularEnts, ent)
+                    end
                 end
-            else
-                table.insert(regularEnts, ent)
             end
         end
         
-        -- Process each type with appropriate bounds
-        BatchUpdateRTXBounds(regularEnts, cv_bounds_size:GetFloat())
-        BatchUpdateRTXBounds(rtxUpdaters, cv_rtx_updater_distance:GetFloat())
-        BatchUpdateRTXBounds(envLights, cv_environment_light_distance:GetFloat())
+        -- Debug output if enabled
+        if cv_debug:GetBool() then
+            print(string.format("[RTX Fixes] Entity counts - Regular: %d, RTX: %d, Env: %d",
+                #regularEnts,
+                #rtxUpdaters,
+                #envLights
+            ))
+        end
+        
+        -- Process each type with appropriate bounds, starting with closest entities
+        if #regularEnts > 0 then
+            BatchUpdateRTXBounds(regularEnts, cv_bounds_size:GetFloat())
+        end
+        
+        if #rtxUpdaters > 0 then
+            BatchUpdateRTXBounds(rtxUpdaters, cv_rtx_updater_distance:GetFloat())
+        end
+        
+        if #envLights > 0 then
+            BatchUpdateRTXBounds(envLights, cv_environment_light_distance:GetFloat())
+        end
     end
 end
 
