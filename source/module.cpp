@@ -8,8 +8,10 @@
 #include <Windows.h>
 #include <d3d9.h>
 #include "rtx_lights/rtx_light_manager.h"
+#include "math/math.hpp"
 #include "shader_fixes/shader_hooks.h"
 #include "prop_fixes.h" 
+
 
 #ifdef GMOD_MAIN
 extern IMaterialSystem* materials = NULL;
@@ -287,6 +289,9 @@ GMOD_MODULE_OPEN() {
             
             LUA->PushCFunction(DrawRTXLights);
             LUA->SetField(-2, "DrawRTXLights");
+
+            RTXMath::Initialize(LUA);
+
         LUA->Pop();
 
         return 0;
