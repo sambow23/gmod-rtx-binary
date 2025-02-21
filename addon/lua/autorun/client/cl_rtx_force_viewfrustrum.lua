@@ -279,27 +279,28 @@ local function CreateStaticProps()
     RunConsoleCommand("r_drawstaticprops", "0")
 
     local props = NikNaks.CurrentMap:GetStaticProps()
+
     local maxDistance = 16384
+    local maxDistSqr = maxDistance * maxDistance
     local playerPos = LocalPlayer():GetPos()
 
-    -- Get filtered props using native implementation
-    local filteredProps = EntityManager.FilterEntitiesByDistance(props, playerPos, maxDistance)
-
-    -- Process the filtered props
-    for _, propData in ipairs(filteredProps) do
-        local prop = ClientsideModel(propData:GetModel())
-        if IsValid(prop) then
-            prop:SetPos(propData:GetPos())
-            prop:SetAngles(propData:GetAngles())
-            prop:SetRenderBounds(mins, maxs)
-            prop:SetColor(propData:GetColor())
-            prop:SetSkin(propData:GetSkin())
-            local scale = propData:GetScale()
-            if scale != 1 then
-                prop:SetModelScale(scale)
+    for _, propData in pairs(props) do
+        local propPos = propData:GetPos()
+        if RTXMath_DistToSqr(propPos, playerPos) <= maxDistSqr then
+            local prop = ClientsideModel(propData:GetModel())
+            if IsValid(prop) then
+                prop:SetPos(propPos)
+                prop:SetAngles(propData:GetAngles())
+                prop:SetRenderBounds(mins, maxs)
+                prop:SetColor(propData:GetColor())
+                prop:SetSkin(propData:GetSkin())
+                local scale = propData:GetScale()
+                if scale != 1 then
+                    prop:SetModelScale(scale)
+                end
+                prop:SetPredictable(false)
+                table.insert(staticProps, prop)
             end
-            prop:SetPredictable(false)
-            table.insert(staticProps, prop)
         end
     end
 end
