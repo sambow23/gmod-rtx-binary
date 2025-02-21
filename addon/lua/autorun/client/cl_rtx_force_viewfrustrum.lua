@@ -2,40 +2,51 @@ if not CLIENT then return end
 
 -- ConVars
 local cv_enabled = CreateClientConVar("fr_enabled", "1", true, false, "Enable large render bounds for all entities")
-local cv_bounds_size = CreateClientConVar("fr_bounds_size", "256", true, false, "Size of render bounds")
-local cv_rtx_updater_distance = CreateClientConVar("fr_rtx_distance", "256", true, false, "Maximum render distance for regular RTX light updaters")
+local cv_bounds_size = CreateClientConVar("fr_bounds_size", "4096", true, false, "Size of render bounds")
+local cv_rtx_updater_distance = CreateClientConVar("fr_rtx_distance", "2048", true, false, "Maximum render distance for regular RTX light updaters")
 local cv_environment_light_distance = CreateClientConVar("fr_environment_light_distance", "32768", true, false, "Maximum render distance for environment light updaters")
 local cv_debug = CreateClientConVar("fr_debug_messages", "0", true, false, "Enable debug messages for RTX view frustum optimization")
 local cv_show_advanced = CreateClientConVar("fr_show_advanced", "0", true, false, "Show advanced RTX view frustum settings")
 
--- Caches
+-- Cache commonly used functions
+local Vector = Vector
+local IsValid = IsValid
+local pairs = pairs
+local ipairs = ipairs
+
+-- Cache the bounds vectors
 local boundsSize = cv_bounds_size:GetFloat()
 local mins = Vector(-boundsSize, -boundsSize, -boundsSize)
 local maxs = Vector(boundsSize, boundsSize, boundsSize)
+
+-- Cache RTXMath functions
+local RTXMath_IsWithinBounds = RTXMath.IsWithinBounds
+local RTXMath_DistToSqr = RTXMath.DistToSqr
+local RTXMath_LerpVector = RTXMath.LerpVector
+local RTXMath_GenerateChunkKey = RTXMath.GenerateChunkKey
+local RTXMath_ComputeNormal = RTXMath.ComputeNormal
+local RTXMath_CreateVector = RTXMath.CreateVector
+local RTXMath_NegateVector = RTXMath.NegateVector
+local RTXMath_MultiplyVector = RTXMath.MultiplyVector
+
+-- Constants and caches
 local DEBOUNCE_TIME = 0.1
 local boundsUpdateTimer = "FR_BoundsUpdate"
 local rtxUpdateTimer = "FR_RTXUpdate"
 local rtxUpdaterCache = {}
 local rtxUpdaterCount = 0
 local staticProps = {}
-local originalBounds = {} -- Store original render bounds
-local IsValid = IsValid
-local Vector = Vector
-local pairs = pairs
-local ipairs = ipairs
-local ZERO_VECTOR = Vector(0, 0, 0)
-local ents_GetAll = ents.GetAll
-local timer_Simple = timer.Simple
-local timer_Create = timer.Create
-local timer_Remove = timer.Remove
-local timer_Exists = timer.Exists
-local RTXMath = RTXMath
+local originalBounds = {}
 
 -- RTX Light Updater model list
 local RTX_UPDATER_MODELS = {
-    ["models/hunter/plates/plate.mdl"] = 1,
-    ["models/hunter/blocks/cube025x025x025.mdl"] = 1
+    ["models/hunter/plates/plate.mdl"] = true,
+    ["models/hunter/blocks/cube025x025x025.mdl"] = true
 }
+
+-- Cache for static props
+local staticProps = {}
+local originalBounds = {} -- Store original render bounds
 
 local SPECIAL_ENTITIES = {
     ["hdri_cube_editor"] = true,
@@ -43,19 +54,11 @@ local SPECIAL_ENTITIES = {
     ["rtx_lightupdatermanager"] = true
 }
 
--- Store light types as numbers instead of strings for faster comparisons
 local LIGHT_TYPES = {
-    POINT = 1,
-    SPOT = 2,
-    DYNAMIC = 3,
-    ENVIRONMENT = 4
-}
-
-local LIGHT_TYPE_STRINGS = {
-    [1] = "light",
-    [2] = "light_spot",
-    [3] = "light_dynamic",
-    [4] = "light_environment"
+    POINT = "light",
+    SPOT = "light_spot",
+    DYNAMIC = "light_dynamic",
+    ENVIRONMENT = "light_environment"
 }
 
 local REGULAR_LIGHT_TYPES = {
@@ -72,6 +75,22 @@ local SPECIAL_ENTITY_BOUNDS = {
     -- Add more entities here as needed:
     -- ["entity_class"] = { size = number, description = "description" }
 }
+
+local function UpdateBoundsVectors(size)
+    boundsSize = size
+    local vec = RTXMath_CreateVector(size, size, size)
+    mins = RTXMath_NegateVector(vec)
+    maxs = vec
+end
+
+local function IsInBounds(pos, mins, maxs)
+    return RTXMath_IsWithinBounds(pos, mins, maxs)
+end
+
+-- Distance check using native implementation
+local function GetDistanceSqr(pos1, pos2)
+    return RTXMath_DistToSqr(pos1, pos2)
+end
 
 -- Helper function to add new special entities
 function AddSpecialEntityBounds(class, size, description)
@@ -95,7 +114,7 @@ local function IsRTXUpdater(ent)
     if not IsValid(ent) then return false end
     local class = ent:GetClass()
     return SPECIAL_ENTITIES[class] or 
-           (ent:GetModel() and RTX_UPDATER_MODELS[ent:GetModel()] == 1)
+           (ent:GetModel() and RTX_UPDATER_MODELS[ent:GetModel()])
 end
 
 -- Store original bounds for an entity
@@ -108,31 +127,25 @@ end
 -- RTX updater cache management functions
 local function AddToRTXCache(ent)
     if not IsValid(ent) or rtxUpdaterCache[ent] then return end
-    if not IsRTXUpdater(ent) then return end
-    
-    rtxUpdaterCache[ent] = true
-    rtxUpdaterCount = rtxUpdaterCount + 1
-    
-    -- Batch process RTX updater setup
-    timer.Simple(0, function()
-        if not IsValid(ent) then return end
+    if IsRTXUpdater(ent) then
+        rtxUpdaterCache[ent] = true
+        rtxUpdaterCount = rtxUpdaterCount + 1
         
-        -- Set all properties in one frame
-        if ent:GetClass() == "hdri_cube_editor" then
-            local hdriSize = 32768
-            local hdriBounds = Vector(hdriSize, hdriSize, hdriSize)
-            ent:SetRenderBounds(-hdriBounds, hdriBounds)
-        else
-            local rtxDistance = cv_rtx_updater_distance:GetFloat()
-            local rtxBounds = Vector(rtxDistance, rtxDistance, rtxDistance)
-            ent:SetRenderBounds(-rtxBounds, rtxBounds)
-        end
-        
-        -- Batch these property changes
+        -- Set initial RTX bounds
+        local rtxDistance = cv_rtx_updater_distance:GetFloat()
+        local rtxBoundsSize = Vector(rtxDistance, rtxDistance, rtxDistance)
+        ent:SetRenderBounds(-rtxBoundsSize, rtxBoundsSize)
         ent:DisableMatrix("RenderMultiply")
         ent:SetNoDraw(false)
-        ent:SetPredictable(false)
-    end)
+        
+        -- Special handling for hdri_cube_editor to ensure it's never culled
+        if ent:GetClass() == "hdri_cube_editor" then
+            -- Using a very large value for HDRI cube editor
+            local hdriSize = 32768 -- Maximum recommended size
+            local hdriBounds = Vector(hdriSize, hdriSize, hdriSize)
+            ent:SetRenderBounds(-hdriBounds, hdriBounds)
+        end
+    end
 end
 
 local function RemoveFromRTXCache(ent)
@@ -140,30 +153,6 @@ local function RemoveFromRTXCache(ent)
         rtxUpdaterCache[ent] = nil
         rtxUpdaterCount = rtxUpdaterCount - 1
     end
-end
-
-local function BatchUpdateRTXBounds(entities, boundsSize)
-    local vectorBounds = Vector(boundsSize, boundsSize, boundsSize)
-    -- Process entities in batches of 100 to prevent frame hitches
-    local batchSize = 100
-    local processed = 0
-    
-    local function ProcessBatch()
-        local endIndex = math.min(processed + batchSize, #entities)
-        for i = processed + 1, endIndex do
-            local ent = entities[i]
-            if IsValid(ent) then
-                ent:SetRenderBounds(-vectorBounds, vectorBounds)
-            end
-        end
-        processed = endIndex
-        
-        if processed < #entities then
-            timer.Simple(0, ProcessBatch) -- Continue next frame
-        end
-    end
-    
-    ProcessBatch()
 end
 
 -- Set bounds for a single entity
@@ -174,90 +163,103 @@ local function SetEntityBounds(ent, useOriginal)
         if originalBounds[ent] then
             ent:SetRenderBounds(originalBounds[ent].mins, originalBounds[ent].maxs)
         end
-    else
-        StoreOriginalBounds(ent)
+        return
+    end
+
+    StoreOriginalBounds(ent)
+    
+    local entPos = ent:GetPos()
+    if not entPos then return end
+
+    -- Check for special entity classes first
+    local specialBounds = SPECIAL_ENTITY_BOUNDS[ent:GetClass()]
+    if specialBounds then
+        local size = specialBounds.size
+        local bounds = RTXMath_CreateVector(size, size, size)
+        local negBounds = RTXMath_NegateVector(bounds)
         
-        -- Check for special entity classes first
-        local specialBounds = SPECIAL_ENTITY_BOUNDS[ent:GetClass()]
-        if specialBounds then
-            local size = specialBounds.size
-            local bounds = Vector(size, size, size)
-            local negBounds = Vector(-size, -size, -size)
+        -- Use native bounds check for optimization
+        if RTXMath_IsWithinBounds(entPos, negBounds, bounds) then
+            ent:SetRenderBounds(negBounds, bounds)
             
-            -- Use native bounds check for optimization
-            if RTXMath.IsWithinBounds(ent:GetPos(), negBounds, bounds) then
-                ent:SetRenderBounds(negBounds, bounds)
-                
-                -- Debug output if enabled
-                if cv_enabled:GetBool() and cv_debug:GetBool() then
-                    print(string.format("[RTX Fixes] Special entity bounds (%s): %d", 
-                        ent:GetClass(), size))
-                end
+            -- Debug output if enabled
+            if cv_enabled:GetBool() and cv_debug:GetBool() then
+                print(string.format("[RTX Fixes] Special entity bounds (%s): %d", 
+                    ent:GetClass(), size))
             end
-            
-        -- Then check other entity types
-        elseif ent:GetClass() == "hdri_cube_editor" then
-            local hdriSize = 32768
-            local hdriBounds = Vector(hdriSize, hdriSize, hdriSize)
-            local negHdriBounds = Vector(-hdriSize, -hdriSize, -hdriSize)
-            
-            -- Use native bounds check
-            if RTXMath.IsWithinBounds(ent:GetPos(), negHdriBounds, hdriBounds) then
-                ent:SetRenderBounds(negHdriBounds, hdriBounds)
-                ent:DisableMatrix("RenderMultiply")
-                ent:SetNoDraw(false)
-            end
-            
-        elseif rtxUpdaterCache[ent] then
-            -- Completely separate handling for environment lights
-            if ent.lightType == LIGHT_TYPES.ENVIRONMENT then
-                local envSize = cv_environment_light_distance:GetFloat()
-                local envBounds = Vector(envSize, envSize, envSize)
-                local negEnvBounds = Vector(-envSize, -envSize, -envSize)
-                
-                -- Use native bounds and distance check
-                local entPos = ent:GetPos()
-                if RTXMath.IsWithinBounds(entPos, negEnvBounds, envBounds) then
-                    ent:SetRenderBounds(negEnvBounds, envBounds)
-                    
-                    -- Only print if debug is enabled
-                    if cv_enabled:GetBool() and cv_debug:GetBool() then
-                        local distSqr = RTXMath.DistToSqr(entPos, vector_origin)
-                        print(string.format("[RTX Fixes] Environment light bounds: %d (Distance: %.2f)", 
-                            envSize, math.sqrt(distSqr)))
-                    end
-                end
-                
-            elseif REGULAR_LIGHT_TYPES[ent.lightType] then
-                local rtxDistance = cv_rtx_updater_distance:GetFloat()
-                local rtxBounds = Vector(rtxDistance, rtxDistance, rtxDistance)
-                local negRtxBounds = Vector(-rtxDistance, -rtxDistance, -rtxDistance)
-                
-                -- Use native bounds and distance check
-                local entPos = ent:GetPos()
-                if RTXMath.IsWithinBounds(entPos, negRtxBounds, rtxBounds) then
-                    ent:SetRenderBounds(negRtxBounds, rtxBounds)
-                    
-                    -- Only print if debug is enabled
-                    if cv_enabled:GetBool() and cv_debug:GetBool() then
-                        local distSqr = RTXMath.DistToSqr(entPos, vector_origin)
-                        print(string.format("[RTX Fixes] Regular light bounds (%s): %d (Distance: %.2f)", 
-                            ent.lightType, rtxDistance, math.sqrt(distSqr)))
-                    end
-                end
-            end
-            
+        end
+        
+    -- Then check other entity types
+elseif ent:GetClass() == "hdri_cube_editor" then
+    local hdriSize = 32768
+    local hdriBounds = RTXMath_CreateVector(hdriSize, hdriSize, hdriSize)
+    local negHdriBounds = RTXMath_NegateVector(hdriBounds)
+        
+        -- Use native bounds check
+        if RTXMath_IsWithinBounds(entPos, negHdriBounds, hdriBounds) then
+            ent:SetRenderBounds(negHdriBounds, hdriBounds)
             ent:DisableMatrix("RenderMultiply")
-            if GetConVar("rtx_lightupdater_show"):GetBool() then
-                ent:SetRenderMode(0)
-                ent:SetColor(Color(255, 255, 255, 255))
-            else
-                ent:SetRenderMode(2)
-                ent:SetColor(Color(255, 255, 255, 1))
+            ent:SetNoDraw(false)
+        end
+        
+    elseif rtxUpdaterCache[ent] then
+        -- Completely separate handling for environment lights
+        if ent.lightType == LIGHT_TYPES.ENVIRONMENT then
+            local envSize = cv_environment_light_distance:GetFloat()
+            local envBounds = RTXMath_CreateVector(envSize, envSize, envSize)
+            local negEnvBounds = RTXMath_NegateVector(envBounds)
+            
+            -- Use native bounds and distance check
+            if RTXMath_IsWithinBounds(entPos, negEnvBounds, envBounds) then
+                ent:SetRenderBounds(negEnvBounds, envBounds)
+                
+                -- Only print if debug is enabled
+                if cv_enabled:GetBool() and cv_debug:GetBool() then
+                    local distSqr = RTXMath_DistToSqr(entPos, vector_origin)
+                    print(string.format("[RTX Fixes] Environment light bounds: %d (Distance: %.2f)", 
+                        envSize, math.sqrt(distSqr)))
+                end
             end
+            
+        elseif REGULAR_LIGHT_TYPES[ent.lightType] then
+            local rtxDistance = cv_rtx_updater_distance:GetFloat()
+            local rtxBounds = RTXMath_CreateVector(rtxDistance, rtxDistance, rtxDistance)
+            local negRtxBounds = RTXMath_NegateVector(rtxBounds)
+            
+            -- Use native bounds and distance check
+            if RTXMath_IsWithinBounds(entPos, negRtxBounds, rtxBounds) then
+                ent:SetRenderBounds(negRtxBounds, rtxBounds)
+                
+                -- Only print if debug is enabled
+                if cv_enabled:GetBool() and cv_debug:GetBool() then
+                    local distSqr = RTXMath_DistToSqr(entPos, vector_origin)
+                    print(string.format("[RTX Fixes] Regular light bounds (%s): %d (Distance: %.2f)", 
+                        ent.lightType, rtxDistance, math.sqrt(distSqr)))
+                end
+            end
+        end
+        
+        ent:DisableMatrix("RenderMultiply")
+        if GetConVar("rtx_lightupdater_show"):GetBool() then
+            ent:SetRenderMode(0)
+            ent:SetColor(Color(255, 255, 255, 255))
         else
-            -- Default bounds
-            if RTXMath.IsWithinBounds(ent:GetPos(), mins, maxs) then
+            ent:SetRenderMode(2)
+            ent:SetColor(Color(255, 255, 255, 1))
+        end
+    else
+        -- Default bounds with native check
+        if RTXMath_IsWithinBounds(entPos, mins, maxs) then
+            ent:SetRenderBounds(mins, maxs)
+        end
+    end
+end
+
+local function BatchUpdateEntities(entities)
+    for _, ent in ipairs(entities) do
+        if IsValid(ent) then
+            local entPos = ent:GetPos()
+            if entPos and RTXMath_IsWithinBounds(entPos, mins, maxs) then
                 ent:SetRenderBounds(mins, maxs)
             end
         end
@@ -266,11 +268,9 @@ end
 
 -- Create clientside static props
 local function CreateStaticProps()
-    -- Clear existing props first
+    -- Clear existing props
     for _, prop in pairs(staticProps) do
-        if IsValid(prop) then
-            prop:Remove()
-        end
+        if IsValid(prop) then prop:Remove() end
     end
     staticProps = {}
 
@@ -278,150 +278,37 @@ local function CreateStaticProps()
 
     -- Disable engine props before creating our own
     RunConsoleCommand("r_drawstaticprops", "0")
-    
-    local props = NikNaks.CurrentMap:GetStaticProps()
-    -- Pre-filter props to only create ones that are likely to be visible
-    local playerPos = LocalPlayer():GetPos()
-    local maxDistance = 16384 -- Adjust based on your needs
-    local maxDistanceSqr = maxDistance * maxDistance
-    
-    local batchSize = 50 -- Create fewer props per frame
-    local processed = 0
-    
-    local function CreatePropBatch()
-        local endIndex = math.min(processed + batchSize, #props)
-        for i = processed + 1, endIndex do
-            local propData = props[i]
-            -- Distance culling for initial creation
-            if RTXMath.DistToSqr(propData:GetPos(), playerPos) <= maxDistanceSqr then
-                local prop = ClientsideModel(propData:GetModel())
-                if IsValid(prop) then
-                    prop:SetPos(propData:GetPos())
-                    prop:SetAngles(propData:GetAngles())
-                    prop:SetRenderBounds(mins, maxs)
-                    prop:SetColor(propData:GetColor())
-                    prop:SetModelScale(propData:GetScale())
-                    -- Reduce network overhead
-                    prop:SetPredictable(false)
-                    -- Disable collisions if not needed
-                    prop:SetCollisionGroup(COLLISION_GROUP_NONE)
-                    table.insert(staticProps, prop)
-                end
-            end
-        end
-        processed = endIndex
-        
-        if processed < #props then
-            timer.Simple(0, CreatePropBatch)
-        end
-    end
-    
-    CreatePropBatch()
-end
 
-local function GroupEntitiesByDistance()
-    local groups = {
-        near = {},    -- Within regular bounds
-        medium = {},  -- Within RTX light bounds
-        far = {}      -- Within environment light bounds
-    }
-    
+    local props = NikNaks.CurrentMap:GetStaticProps()
+
+    local maxDistance = 16384
+    local maxDistSqr = maxDistance * maxDistance
     local playerPos = LocalPlayer():GetPos()
-    
-    for _, ent in ipairs(ents.GetAll()) do
-        if IsValid(ent) then
-            local distSqr = RTXMath.DistToSqr(ent:GetPos(), playerPos)
-            
-            if distSqr <= (cv_bounds_size:GetFloat() ^ 2) then
-                table.insert(groups.near, ent)
-            elseif distSqr <= (cv_rtx_updater_distance:GetFloat() ^ 2) then
-                table.insert(groups.medium, ent)
-            else
-                table.insert(groups.far, ent)
+
+    for _, propData in pairs(props) do
+        local propPos = propData:GetPos()
+        if RTXMath_DistToSqr(propPos, playerPos) <= maxDistSqr then
+            local prop = ClientsideModel(propData:GetModel())
+            if IsValid(prop) then
+                prop:SetPos(propPos)
+                prop:SetAngles(propData:GetAngles())
+                prop:SetRenderBounds(mins, maxs)
+                prop:SetColor(propData:GetColor())
+                local scale = propData:GetScale()
+                if scale != 1 then
+                    prop:SetModelScale(scale)
+                end
+                prop:SetPredictable(false)
+                table.insert(staticProps, prop)
             end
         end
     end
-    
-    return groups
 end
 
 -- Update all entities
 local function UpdateAllEntities(useOriginal)
-    local entities = ents.GetAll()
-    local playerPos = LocalPlayer():GetPos()
-    
-    if useOriginal then
-        -- Batch process original bounds restoration
-        local boundsEntities = {}
-        for _, ent in ipairs(entities) do
-            if originalBounds[ent] and IsValid(ent) then
-                local entPos = ent:GetPos()
-                if entPos and RTXMath.DistToSqr(entPos, playerPos) <= (cv_bounds_size:GetFloat() ^ 2) then
-                    table.insert(boundsEntities, ent)
-                end
-            end
-        end
-        BatchUpdateRTXBounds(boundsEntities, cv_bounds_size:GetFloat())
-    else
-        -- Separate entities by type for optimized processing using distance-based culling
-        local regularEnts = {}
-        local rtxUpdaters = {}
-        local envLights = {}
-        
-        -- Pre-calculate distance thresholds
-        local regularDistSqr = cv_bounds_size:GetFloat() ^ 2
-        local rtxDistSqr = cv_rtx_updater_distance:GetFloat() ^ 2
-        local envDistSqr = cv_environment_light_distance:GetFloat() ^ 2
-        
-        for _, ent in ipairs(entities) do
-            if IsValid(ent) then
-                local entPos = ent:GetPos()
-                if not entPos then continue end
-                
-                local distSqr = RTXMath.DistToSqr(entPos, playerPos)
-                
-                if rtxUpdaterCache[ent] then
-                    if ent.lightType == LIGHT_TYPE_STRINGS[LIGHT_TYPES.ENVIRONMENT] then
-                        -- Environment lights have the largest range
-                        if distSqr <= envDistSqr then
-                            table.insert(envLights, ent)
-                        end
-                    else
-                        -- Regular RTX updaters
-                        if distSqr <= rtxDistSqr then
-                            table.insert(rtxUpdaters, ent)
-                        end
-                    end
-                else
-                    -- Regular entities have the smallest range
-                    if distSqr <= regularDistSqr then
-                        table.insert(regularEnts, ent)
-                    end
-                end
-            end
-        end
-        
-        -- Debug output if enabled
-        if cv_debug:GetBool() then
-            print(string.format("[RTX Fixes] Entity counts - Regular: %d, RTX: %d, Env: %d",
-                #regularEnts,
-                #rtxUpdaters,
-                #envLights
-            ))
-        end
-        
-        -- Process each type with appropriate bounds, starting with closest entities
-        if #regularEnts > 0 then
-            BatchUpdateRTXBounds(regularEnts, cv_bounds_size:GetFloat())
-        end
-        
-        if #rtxUpdaters > 0 then
-            BatchUpdateRTXBounds(rtxUpdaters, cv_rtx_updater_distance:GetFloat())
-        end
-        
-        if #envLights > 0 then
-            BatchUpdateRTXBounds(envLights, cv_environment_light_distance:GetFloat())
-        end
+    for _, ent in ipairs(ents.GetAll()) do
+        SetEntityBounds(ent, useOriginal)
     end
 end
 
@@ -472,6 +359,7 @@ cvars.AddChangeCallback("fr_enabled", function(_, _, new)
     if enabled then
         UpdateAllEntities(false)
         CreateStaticProps()
+        
         -- Disable engine static props when enabled
         RunConsoleCommand("r_drawstaticprops", "0")
     else
@@ -489,30 +377,15 @@ cvars.AddChangeCallback("fr_enabled", function(_, _, new)
 end)
 
 cvars.AddChangeCallback("fr_bounds_size", function(_, _, new)
-    -- Cancel any pending updates
     if timer.Exists(boundsUpdateTimer) then
         timer.Remove(boundsUpdateTimer)
     end
     
-    -- Schedule the update
     timer.Create(boundsUpdateTimer, DEBOUNCE_TIME, 1, function()
-        boundsSize = tonumber(new)
-        local newBounds = Vector(boundsSize, boundsSize, boundsSize)
-        local negNewBounds = Vector(-boundsSize, -boundsSize, -boundsSize)
-        
-        -- Pre-validate bounds for all entities
-        local validEnts = {}
-        for _, ent in ipairs(ents.GetAll()) do
-            if IsValid(ent) and RTXMath.IsWithinBounds(ent:GetPos(), negNewBounds, newBounds) then
-                table.insert(validEnts, ent)
-            end
-        end
-        
-        mins = negNewBounds
-        maxs = newBounds
+        UpdateBoundsVectors(tonumber(new))
         
         if cv_enabled:GetBool() then
-            BatchUpdateRTXBounds(validEnts, boundsSize)
+            UpdateAllEntities(false)
             CreateStaticProps()
         end
     end)
@@ -595,11 +468,6 @@ hook.Add("EntityRemoved", "CleanupRTXCache", function(ent)
     originalBounds[ent] = nil
 end)
 
-hook.Add("ShutDown", "CleanupStaticPropSettings", function()
-    -- Restore engine static props on shutdown
-    RunConsoleCommand("r_drawstaticprops", "1")
-end)
-
 -- Debug command
 concommand.Add("fr_debug", function()
     print("\nRTX Frustum Optimization Debug:")
@@ -617,17 +485,6 @@ concommand.Add("fr_debug", function()
             class, 
             data.size, 
             data.description))
-    end
-    -- Add distance analysis
-    local playerPos = LocalPlayer():GetPos()
-    print("\nDistance Analysis:")
-    for ent in pairs(rtxUpdaterCache) do
-        if IsValid(ent) then
-            local distSqr = RTXMath.DistToSqr(ent:GetPos(), playerPos)
-            print(string.format("  %s: %.2f units", 
-                ent:GetClass(), 
-                math.sqrt(distSqr)))
-        end
     end
 end)
 

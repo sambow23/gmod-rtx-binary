@@ -14,6 +14,9 @@ namespace RTXMath {
     bool IsWithinBounds(const Vector3& point, const Vector3& mins, const Vector3& maxs);
     int64_t GenerateChunkKey(int x, int y, int z);
     Vector3 ComputeNormal(const Vector3& v1, const Vector3& v2, const Vector3& v3);
+    Vector3 CreateVector(float x, float y, float z);
+    Vector3 NegateVector(const Vector3& v);
+    Vector3 MultiplyVector(const Vector3& v, float scale);
 
     // Initialize math module
     void Initialize(GarrysMod::Lua::ILuaBase* LUA);
