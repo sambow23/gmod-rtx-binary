@@ -12,6 +12,8 @@ ENT.Category        = "RTX"
 ENT.Spawnable       = false
 ENT.AdminSpawnable  = false
 
+CreateConVar("rtx_lightupdater_debug", "0", FCVAR_ARCHIVE, "Show debug information for light updaters")
+
 local LIGHT_TYPES = {
     POINT = "light",
     SPOT = "light_spot",
@@ -47,28 +49,18 @@ function TableConcat(t1,t2)
 end
 
 function ENT:CreateUpdaters()
-    local playerPos = LocalPlayer():GetPos()
-    
     -- Create updaters for regular lights
     self.regularUpdaters = {}
-    local maxRegularUpdaters = math.min(GetConVar("rtx_lightupdater_count"):GetInt(), #self.regularLights)
     
-    -- Sort lights by distance before creating updaters
-    table.sort(self.regularLights, function(a, b)
-        return RTXMath.DistToSqr(a.origin, playerPos) < RTXMath.DistToSqr(b.origin, playerPos)
-    end)
-    
-    for i = 1, maxRegularUpdaters do
-        local light = self.regularLights[i]
-        if light then
-            local updater = ents.CreateClientside("rtx_lightupdater")
-            updater.lightInfo = light
-            updater.lightType = light.lightType
-            updater.lightIndex = i
-            updater.lightOrigin = light.origin
-            updater:Spawn()
-            self.regularUpdaters[i] = updater
-        end
+    -- Create an updater for every regular light
+    for i, light in ipairs(self.regularLights) do
+        local updater = ents.CreateClientside("rtx_lightupdater")
+        updater.lightInfo = light
+        updater.lightType = light.lightType
+        updater.lightIndex = i
+        updater.lightOrigin = light.origin
+        updater:Spawn()
+        self.regularUpdaters[i] = updater
     end
 
     -- Create updaters for environment lights
@@ -82,6 +74,11 @@ function ENT:CreateUpdaters()
         updater:Spawn()
         self.environmentUpdaters[i] = updater
     end
+    
+    -- Print debug info
+    print(string.format("[RTX Fixes] Created %d regular light updaters and %d environment light updaters",
+        #self.regularUpdaters,
+        #self.environmentUpdaters))
 end
 
 function ENT:Initialize() 
@@ -97,46 +94,47 @@ function ENT:Initialize()
     self.environmentLights = {}
     
     if NikNaks and NikNaks.CurrentMap then
-        local playerPos = LocalPlayer():GetPos()
-        local envDistance = 32768 -- Maximum distance for environment lights
-        local regularDistance = 4096 -- Regular light distance
-        
-        -- Find and categorize all lights with distance culling
-        local allLights = {}
+        -- Find and categorize all lights without distance culling
+        -- Point lights
         for _, light in ipairs(NikNaks.CurrentMap:FindByClass("light")) do
-            if RTXMath.DistToSqr(light.origin, playerPos) <= (regularDistance * regularDistance) then
-                light.lightType = LIGHT_TYPES.POINT
-                table.insert(allLights, light)
-            end
+            light.lightType = LIGHT_TYPES.POINT
+            table.insert(self.regularLights, light)
         end
         
+        -- Spot lights
         for _, light in ipairs(NikNaks.CurrentMap:FindByClass("light_spot")) do
-            if RTXMath.DistToSqr(light.origin, playerPos) <= (regularDistance * regularDistance) then
-                light.lightType = LIGHT_TYPES.SPOT
-                table.insert(allLights, light)
-            end
+            light.lightType = LIGHT_TYPES.SPOT
+            table.insert(self.regularLights, light)
         end
         
+        -- Dynamic lights
         for _, light in ipairs(NikNaks.CurrentMap:FindByClass("light_dynamic")) do
-            if RTXMath.DistToSqr(light.origin, playerPos) <= (regularDistance * regularDistance) then
-                light.lightType = LIGHT_TYPES.DYNAMIC
-                table.insert(allLights, light)
-            end
+            light.lightType = LIGHT_TYPES.DYNAMIC
+            table.insert(self.regularLights, light)
         end
         
-        -- Environment lights use larger distance check
+        -- Environment lights
         for _, light in ipairs(NikNaks.CurrentMap:FindByClass("light_environment")) do
-            if RTXMath.DistToSqr(light.origin, playerPos) <= (envDistance * envDistance) then
-                light.lightType = LIGHT_TYPES.ENVIRONMENT
-                table.insert(self.environmentLights, light)
-            end
+            light.lightType = LIGHT_TYPES.ENVIRONMENT
+            table.insert(self.environmentLights, light)
         end
-
-        self.regularLights = allLights
     end
 
-    -- Create updaters with spatial optimization
+    -- Create updaters with no limit
     self:CreateUpdaters()
+
+    if GetConVar("rtx_lightupdater_debug"):GetBool() then
+        print("[RTX Fixes] Light counts by type:")
+        local counts = {}
+        for _, light in ipairs(self.regularLights) do
+            counts[light.lightType] = (counts[light.lightType] or 0) + 1
+        end
+        counts[LIGHT_TYPES.ENVIRONMENT] = #self.environmentLights
+        
+        for type, count in pairs(counts) do
+            print(string.format("  %s: %d", type, count))
+        end
+    end
 end
 
 function MovetoPositions(self)  
