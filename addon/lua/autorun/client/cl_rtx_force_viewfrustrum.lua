@@ -175,19 +175,43 @@ local function SetEntityBounds(ent, useOriginal)
     local specialBounds = SPECIAL_ENTITY_BOUNDS[ent:GetClass()]
     if specialBounds then
         local size = specialBounds.size
-        local bounds = RTXMath_CreateVector(size, size, size)
-        local negBounds = RTXMath_NegateVector(bounds)
         
-        -- Use native bounds check for optimization
-        if RTXMath_IsWithinBounds(entPos, negBounds, bounds) then
-            ent:SetRenderBounds(negBounds, bounds)
+        -- For doors, make bounds larger in rotation direction
+        if ent:GetClass() == "prop_door_rotating" then
+            -- Get door's rotation axis and make bounds larger in that direction
+            local angles = ent:GetAngles()
+            local forward = RTXMath_MultiplyVector(angles:Forward(), size * 2) -- Double size in rotation direction
+            local right = RTXMath_MultiplyVector(angles:Right(), size)
+            local up = RTXMath_MultiplyVector(angles:Up(), size)
             
-            -- Debug output if enabled
-            if cv_enabled:GetBool() and cv_debug:GetBool() then
-                print(string.format("[RTX Fixes] Special entity bounds (%s): %d", 
-                    ent:GetClass(), size))
-            end
+            -- Create asymmetric bounds based on door's rotation
+            local mins = RTXMath_CreateVector(
+                -math.abs(forward.x) - math.abs(right.x) - math.abs(up.x),
+                -math.abs(forward.y) - math.abs(right.y) - math.abs(up.y),
+                -math.abs(forward.z) - math.abs(right.z) - math.abs(up.z)
+            )
+            
+            local maxs = RTXMath_CreateVector(
+                math.abs(forward.x) + math.abs(right.x) + math.abs(up.x),
+                math.abs(forward.y) + math.abs(right.y) + math.abs(up.y),
+                math.abs(forward.z) + math.abs(right.z) + math.abs(up.z)
+            )
+            
+            ent:SetRenderBounds(mins, maxs)
+        else
+            -- Regular special entities
+            local bounds = RTXMath_CreateVector(size, size, size)
+            local negBounds = RTXMath_NegateVector(bounds)
+            ent:SetRenderBounds(negBounds, bounds)
         end
+        
+        -- Debug output if enabled
+        if cv_enabled:GetBool() and cv_debug:GetBool() then
+            print(string.format("[RTX Fixes] Special entity bounds applied (%s): %d", 
+                ent:GetClass(), size))
+        end
+        
+        return
         
     -- Then check other entity types
 elseif ent:GetClass() == "hdri_cube_editor" then
@@ -294,6 +318,7 @@ local function CreateStaticProps()
                 prop:SetAngles(propData:GetAngles())
                 prop:SetRenderBounds(mins, maxs)
                 prop:SetColor(propData:GetColor())
+                prop:SetSkin(propData:GetSkin())
                 local scale = propData:GetScale()
                 if scale != 1 then
                     prop:SetModelScale(scale)
