@@ -248,7 +248,13 @@ local function SetEntityBounds(ent, useOriginal)
             end
             
             ent:DisableMatrix("RenderMultiply")
-            ent:SetNoDraw(false)
+            if GetConVar("rtx_lightupdater_show"):GetBool() then
+                ent:SetRenderMode(0)
+                ent:SetColor(Color(255, 255, 255, 255))
+            else
+                ent:SetRenderMode(2)
+                ent:SetColor(Color(255, 255, 255, 1))
+            end
         else
             -- Default bounds
             if RTXMath.IsWithinBounds(ent:GetPos(), mins, maxs) then
