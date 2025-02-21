@@ -28,6 +28,8 @@ local table_insert = table.insert
 local MAX_VERTICES = 10000
 local MAX_CHUNK_VERTS = 32768
 local boundingRegions = {}
+local isDrawingSkybox = false
+
 
 -- Pre-allocate common vectors and tables for reuse
 local vertexBuffer = {
@@ -539,35 +541,43 @@ local function RenderCustomWorld(translucent)
 end
 
 -- Enable/Disable Functions
+-- Update the EnableCustomRendering function
 local function EnableCustomRendering()
     if isEnabled then return end
     isEnabled = true
 
-    -- Check if we're in a skybox pass before applying our custom rendering
+    hook.Add("PreDrawSkyBox", "RTXSkyboxState", function()
+        isDrawingSkybox = true
+    end)
+
+    hook.Add("PostDrawSkyBox", "RTXSkyboxState", function()
+        isDrawingSkybox = false
+    end)
+
     hook.Add("PreDrawWorld", "RTXHideWorld", function()
-        if render.GetRenderTarget() then return end -- Don't interfere with RT passes
-        if render.IsDrawingSkybox() then return end -- Don't interfere with skybox passes
+        if isDrawingSkybox then return end
+        if render.GetRenderTarget() then return end
         
         render.OverrideDepthEnable(true, false)
         return true
     end)
     
     hook.Add("PostDrawWorld", "RTXHideWorld", function()
+        if isDrawingSkybox then return end
         if render.GetRenderTarget() then return end
-        if render.IsDrawingSkybox() then return end
         
         render.OverrideDepthEnable(false)
     end)
     
     hook.Add("PreDrawOpaqueRenderables", "RTXCustomWorld", function(bDrawingDepth, bDrawingSkybox)
-        if bDrawingSkybox then return end -- Skip our custom rendering during skybox passes
+        if isDrawingSkybox then return end
         if render.GetRenderTarget() then return end
         
         RenderCustomWorld(false)
     end)
     
     hook.Add("PreDrawTranslucentRenderables", "RTXCustomWorld", function(bDrawingDepth, bDrawingSkybox)
-        if bDrawingSkybox then return end -- Skip our custom rendering during skybox passes
+        if isDrawingSkybox then return end
         if render.GetRenderTarget() then return end
         
         RenderCustomWorld(true)
@@ -578,6 +588,8 @@ local function DisableCustomRendering()
     if not isEnabled then return end
     isEnabled = false
 
+    hook.Remove("PreDrawSkyBox", "RTXSkyboxState")
+    hook.Remove("PostDrawSkyBox", "RTXSkyboxState")
     hook.Remove("PreDrawWorld", "RTXHideWorld")
     hook.Remove("PostDrawWorld", "RTXHideWorld")
     hook.Remove("PreDrawOpaqueRenderables", "RTXCustomWorld")
