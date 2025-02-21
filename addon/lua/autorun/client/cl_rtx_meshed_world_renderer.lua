@@ -27,6 +27,7 @@ local math_floor = math.floor
 local table_insert = table.insert
 local MAX_VERTICES = 10000
 local MAX_CHUNK_VERTS = 32768
+local boundingRegions = {}
 
 -- Pre-allocate common vectors and tables for reuse
 local vertexBuffer = {
@@ -34,6 +35,164 @@ local vertexBuffer = {
     normals = {},
     uvs = {}
 }
+
+local function MapTable(tbl, func)
+    local mapped = {}
+    for i, v in ipairs(tbl) do
+        mapped[i] = func(v)
+    end
+    return mapped
+end
+
+local function CalculateRegionBounds(vertices)
+    local mins = Vector(math_huge, math_huge, math_huge)
+    local maxs = Vector(-math_huge, -math_huge, -math_huge)
+    
+    for _, vert in ipairs(vertices) do
+        mins.x = math_min(mins.x, vert.x)
+        mins.y = math_min(mins.y, vert.y)
+        mins.z = math_min(mins.z, vert.z)
+        maxs.x = math_max(maxs.x, vert.x)
+        maxs.y = math_max(maxs.y, vert.y)
+        maxs.z = math_max(maxs.z, vert.z)
+    end
+    
+    return {mins = mins, maxs = maxs}
+end
+
+local function IsPointInRegion(point, region)
+    return point.x >= region.mins.x and point.x <= region.maxs.x and
+           point.y >= region.mins.y and point.y <= region.maxs.y and
+           point.z >= region.mins.z and point.z <= region.maxs.z
+end
+
+local function IdentifyMapRegions()
+    boundingRegions = {}
+    local gap_threshold = 2048 -- Units to consider a gap between regions
+    
+    print("[RTX Fixes] Starting region identification...")
+    
+    -- First collect all vertices to find major areas
+    local allVertices = {}
+    local processed_count = 0
+    
+    for _, leaf in pairs(NikNaks.CurrentMap:GetLeafs()) do
+        if not leaf or leaf:IsOutsideMap() then continue end
+        
+        local leafFaces = leaf:GetFaces(true)
+        if not leafFaces then continue end
+        
+        for _, face in pairs(leafFaces) do
+            if not face then continue end
+            
+            local vertices = face:GetVertexs()
+            if not vertices or #vertices == 0 then continue end
+            
+            for _, vert in ipairs(vertices) do
+                table_insert(allVertices, vert)
+            end
+            
+            processed_count = processed_count + 1
+            if processed_count % 5000 == 0 then
+                print(string.format("[RTX Fixes] Processed %d faces...", processed_count))
+            end
+        end
+    end
+    
+    -- Calculate initial bounds
+    local mapBounds = CalculateRegionBounds(allVertices)
+    local currentRegion = {
+        bounds = mapBounds,
+        center = (mapBounds.maxs + mapBounds.mins) / 2
+    }
+    
+    -- Split into regions based on major gaps
+    local xSize = mapBounds.maxs.x - mapBounds.mins.x
+    local ySize = mapBounds.maxs.y - mapBounds.mins.y
+    local zSize = mapBounds.maxs.z - mapBounds.mins.z
+    
+    -- If any dimension has a significant gap, split into regions
+    if xSize > gap_threshold * 4 or ySize > gap_threshold * 4 or zSize > gap_threshold * 4 then
+        local regions = {}
+        
+        -- Split map into octants
+        local midX = (mapBounds.mins.x + mapBounds.maxs.x) / 2
+        local midY = (mapBounds.mins.y + mapBounds.maxs.y) / 2
+        local midZ = (mapBounds.mins.z + mapBounds.maxs.z) / 2
+        
+        for x = 0, 1 do
+            for y = 0, 1 do
+                for z = 0, 1 do
+                    local regionBounds = {
+                        mins = Vector(
+                            x == 0 and mapBounds.mins.x or midX,
+                            y == 0 and mapBounds.mins.y or midY,
+                            z == 0 and mapBounds.mins.z or midZ
+                        ),
+                        maxs = Vector(
+                            x == 0 and midX or mapBounds.maxs.x,
+                            y == 0 and midY or mapBounds.maxs.y,
+                            z == 0 and midZ or mapBounds.maxs.z
+                        )
+                    }
+                    
+                    -- Only add region if it contains vertices
+                    local hasVertices = false
+                    for _, vert in ipairs(allVertices) do
+                        if IsPointInRegion(vert, regionBounds) then
+                            hasVertices = true
+                            break
+                        end
+                    end
+                    
+                    if hasVertices then
+                        table_insert(regions, {
+                            bounds = regionBounds,
+                            center = (regionBounds.maxs + regionBounds.mins) / 2
+                        })
+                    end
+                end
+            end
+        end
+        
+        boundingRegions = regions
+    else
+        boundingRegions = {currentRegion}
+    end
+    
+    print(string.format("[RTX Fixes] Identified %d regions", #boundingRegions))
+end
+
+local function IsInSeparateRegion(face)
+    if #boundingRegions <= 1 then return false end
+    
+    local vertices = face:GetVertexs()
+    if not vertices or #vertices == 0 then return false end
+    
+    -- Calculate face center
+    local center = Vector(0, 0, 0)
+    for _, vert in ipairs(vertices) do
+        center:Add(vert)
+    end
+    center:Div(#vertices)
+    
+    -- Get player position
+    local playerPos = LocalPlayer():GetPos()
+    
+    -- Find which region contains the player
+    local playerRegion = nil
+    for _, region in ipairs(boundingRegions) do
+        if IsPointInRegion(playerPos, region.bounds) then
+            playerRegion = region
+            break
+        end
+    end
+    
+    if not playerRegion then return false end
+    
+    -- If face is not in player's region, it should be culled
+    return not IsPointInRegion(center, playerRegion.bounds)
+end
 
 local function ValidateVertex(pos)
     -- Check for NaN or extreme values
@@ -193,6 +352,9 @@ local function BuildMapMeshes()
     print("[RTX Fixes] Building chunked meshes...")
     local startTime = SysTime()
     
+    -- Initialize regions before processing faces
+    IdentifyMapRegions()
+    
     -- Count total faces for chunk size optimization
     local totalFaces = 0
     for _, leaf in pairs(NikNaks.CurrentMap:GetLeafs()) do
@@ -223,7 +385,8 @@ local function BuildMapMeshes()
                face:IsDisplacement() or -- Skip displacements early
                IsBrushEntity(face) or
                not face:ShouldRender() or 
-               IsSkyboxFace(face) then 
+               IsSkyboxFace(face) or
+               IsInSeparateRegion(face) then -- New region check here
                 continue 
             end
             
