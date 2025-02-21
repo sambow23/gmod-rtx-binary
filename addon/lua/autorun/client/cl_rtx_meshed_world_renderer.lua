@@ -60,21 +60,22 @@ local function CalculateRegionBounds(vertices)
     return {mins = mins, maxs = maxs}
 end
 
-local function IsPointInRegion(point, region)
-    return point.x >= region.mins.x and point.x <= region.maxs.x and
-           point.y >= region.mins.y and point.y <= region.maxs.y and
-           point.z >= region.mins.z and point.z <= region.maxs.z
+local function IsPointInRegion(point, region, tolerance)
+    tolerance = tolerance or 0
+    return point.x >= (region.mins.x - tolerance) and point.x <= (region.maxs.x + tolerance) and
+           point.y >= (region.mins.y - tolerance) and point.y <= (region.maxs.y + tolerance) and
+           point.z >= (region.mins.z - tolerance) and point.z <= (region.maxs.z + tolerance)
 end
 
 local function IdentifyMapRegions()
     boundingRegions = {}
-    local gap_threshold = 2048 -- Units to consider a gap between regions
+    local huge_gap_threshold = 8192 -- Only split on very large gaps
     
     print("[RTX Fixes] Starting region identification...")
     
-    -- First collect all vertices to find major areas
-    local allVertices = {}
-    local processed_count = 0
+    -- First collect vertices and group them by major distance breaks
+    local vertexGroups = {{}}
+    local currentGroup = 1
     
     for _, leaf in pairs(NikNaks.CurrentMap:GetLeafs()) do
         if not leaf or leaf:IsOutsideMap() then continue end
@@ -88,79 +89,64 @@ local function IdentifyMapRegions()
             local vertices = face:GetVertexs()
             if not vertices or #vertices == 0 then continue end
             
+            -- Calculate face center
+            local center = Vector(0, 0, 0)
             for _, vert in ipairs(vertices) do
-                table_insert(allVertices, vert)
+                center:Add(vert)
+            end
+            center:Div(#vertices)
+            
+            -- Check if this face is far from existing groups
+            local foundGroup = false
+            for i, group in ipairs(vertexGroups) do
+                if #group == 0 then
+                    table_insert(group, {center = center, face = face})
+                    foundGroup = true
+                    break
+                end
+                
+                -- Check distance to group's first vertex
+                local groupCenter = group[1].center
+                local dist = (center - groupCenter):Length()
+                
+                if dist < huge_gap_threshold then
+                    table_insert(group, {center = center, face = face})
+                    foundGroup = true
+                    break
+                end
             end
             
-            processed_count = processed_count + 1
-            if processed_count % 5000 == 0 then
-                print(string.format("[RTX Fixes] Processed %d faces...", processed_count))
+            -- If no suitable group found, create new one
+            if not foundGroup then
+                vertexGroups[#vertexGroups + 1] = {{center = center, face = face}}
             end
         end
     end
     
-    -- Calculate initial bounds
-    local mapBounds = CalculateRegionBounds(allVertices)
-    local currentRegion = {
-        bounds = mapBounds,
-        center = (mapBounds.maxs + mapBounds.mins) / 2
-    }
-    
-    -- Split into regions based on major gaps
-    local xSize = mapBounds.maxs.x - mapBounds.mins.x
-    local ySize = mapBounds.maxs.y - mapBounds.mins.y
-    local zSize = mapBounds.maxs.z - mapBounds.mins.z
-    
-    -- If any dimension has a significant gap, split into regions
-    if xSize > gap_threshold * 4 or ySize > gap_threshold * 4 or zSize > gap_threshold * 4 then
-        local regions = {}
+    -- Convert groups to regions
+    for _, group in ipairs(vertexGroups) do
+        if #group == 0 then continue end
         
-        -- Split map into octants
-        local midX = (mapBounds.mins.x + mapBounds.maxs.x) / 2
-        local midY = (mapBounds.mins.y + mapBounds.maxs.y) / 2
-        local midZ = (mapBounds.mins.z + mapBounds.maxs.z) / 2
-        
-        for x = 0, 1 do
-            for y = 0, 1 do
-                for z = 0, 1 do
-                    local regionBounds = {
-                        mins = Vector(
-                            x == 0 and mapBounds.mins.x or midX,
-                            y == 0 and mapBounds.mins.y or midY,
-                            z == 0 and mapBounds.mins.z or midZ
-                        ),
-                        maxs = Vector(
-                            x == 0 and midX or mapBounds.maxs.x,
-                            y == 0 and midY or mapBounds.maxs.y,
-                            z == 0 and midZ or mapBounds.maxs.z
-                        )
-                    }
-                    
-                    -- Only add region if it contains vertices
-                    local hasVertices = false
-                    for _, vert in ipairs(allVertices) do
-                        if IsPointInRegion(vert, regionBounds) then
-                            hasVertices = true
-                            break
-                        end
-                    end
-                    
-                    if hasVertices then
-                        table_insert(regions, {
-                            bounds = regionBounds,
-                            center = (regionBounds.maxs + regionBounds.mins) / 2
-                        })
-                    end
+        local vertices = {}
+        for _, data in ipairs(group) do
+            local faceVerts = data.face:GetVertexs()
+            if faceVerts then
+                for _, vert in ipairs(faceVerts) do
+                    table_insert(vertices, vert)
                 end
             end
         end
         
-        boundingRegions = regions
-    else
-        boundingRegions = {currentRegion}
+        if #vertices > 0 then
+            local bounds = CalculateRegionBounds(vertices)
+            table_insert(boundingRegions, {
+                bounds = bounds,
+                center = (bounds.maxs + bounds.mins) / 2
+            })
+        end
     end
     
-    print(string.format("[RTX Fixes] Identified %d regions", #boundingRegions))
+    print(string.format("[RTX Fixes] Identified %d distinct regions", #boundingRegions))
 end
 
 local function IsInSeparateRegion(face)
@@ -178,11 +164,12 @@ local function IsInSeparateRegion(face)
     
     -- Get player position
     local playerPos = LocalPlayer():GetPos()
+    local tolerance = 256 -- Add some tolerance to prevent edge cases
     
     -- Find which region contains the player
     local playerRegion = nil
     for _, region in ipairs(boundingRegions) do
-        if IsPointInRegion(playerPos, region.bounds) then
+        if IsPointInRegion(playerPos, region.bounds, tolerance) then
             playerRegion = region
             break
         end
@@ -190,8 +177,9 @@ local function IsInSeparateRegion(face)
     
     if not playerRegion then return false end
     
-    -- If face is not in player's region, it should be culled
-    return not IsPointInRegion(center, playerRegion.bounds)
+    -- Check if face is in a different region than the player
+    -- and if that region is significantly far from the player's region
+    return not IsPointInRegion(center, playerRegion.bounds, tolerance)
 end
 
 local function ValidateVertex(pos)
@@ -555,21 +543,33 @@ local function EnableCustomRendering()
     if isEnabled then return end
     isEnabled = true
 
-    -- Disable world rendering using render.OverrideDepthEnable
+    -- Check if we're in a skybox pass before applying our custom rendering
     hook.Add("PreDrawWorld", "RTXHideWorld", function()
+        if render.GetRenderTarget() then return end -- Don't interfere with RT passes
+        if render.IsDrawingSkybox() then return end -- Don't interfere with skybox passes
+        
         render.OverrideDepthEnable(true, false)
         return true
     end)
     
     hook.Add("PostDrawWorld", "RTXHideWorld", function()
+        if render.GetRenderTarget() then return end
+        if render.IsDrawingSkybox() then return end
+        
         render.OverrideDepthEnable(false)
     end)
     
-    hook.Add("PreDrawOpaqueRenderables", "RTXCustomWorld", function()
+    hook.Add("PreDrawOpaqueRenderables", "RTXCustomWorld", function(bDrawingDepth, bDrawingSkybox)
+        if bDrawingSkybox then return end -- Skip our custom rendering during skybox passes
+        if render.GetRenderTarget() then return end
+        
         RenderCustomWorld(false)
     end)
     
-    hook.Add("PreDrawTranslucentRenderables", "RTXCustomWorld", function()
+    hook.Add("PreDrawTranslucentRenderables", "RTXCustomWorld", function(bDrawingDepth, bDrawingSkybox)
+        if bDrawingSkybox then return end -- Skip our custom rendering during skybox passes
+        if render.GetRenderTarget() then return end
+        
         RenderCustomWorld(true)
     end)
 end
