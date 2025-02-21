@@ -79,8 +79,6 @@ local function MaterialFixups()
 	MaterialFixupInDir("materials/particle/")
 	MaterialFixupInDir("materials/effects/")
 
-	FixupWater()
-
 	-- giving things a real texture makes remix less confused
 	FixupGUIMaterial(Material("vgui/white"), "materials/vgui/white.vmt")
 	FixupGUIMaterial(Material("vgui/white_additive"), "materials/vgui/white_additive.vmt") 
