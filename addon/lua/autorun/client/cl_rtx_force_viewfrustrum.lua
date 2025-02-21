@@ -176,28 +176,9 @@ local function SetEntityBounds(ent, useOriginal)
     if specialBounds then
         local size = specialBounds.size
         
-        -- For doors, make bounds larger in rotation direction
+        -- For doors, use our native implementation
         if ent:GetClass() == "prop_door_rotating" then
-            -- Get door's rotation axis and make bounds larger in that direction
-            local angles = ent:GetAngles()
-            local forward = RTXMath_MultiplyVector(angles:Forward(), size * 2) -- Double size in rotation direction
-            local right = RTXMath_MultiplyVector(angles:Right(), size)
-            local up = RTXMath_MultiplyVector(angles:Up(), size)
-            
-            -- Create asymmetric bounds based on door's rotation
-            local mins = RTXMath_CreateVector(
-                -math.abs(forward.x) - math.abs(right.x) - math.abs(up.x),
-                -math.abs(forward.y) - math.abs(right.y) - math.abs(up.y),
-                -math.abs(forward.z) - math.abs(right.z) - math.abs(up.z)
-            )
-            
-            local maxs = RTXMath_CreateVector(
-                math.abs(forward.x) + math.abs(right.x) + math.abs(up.x),
-                math.abs(forward.y) + math.abs(right.y) + math.abs(up.y),
-                math.abs(forward.z) + math.abs(right.z) + math.abs(up.z)
-            )
-            
-            ent:SetRenderBounds(mins, maxs)
+            EntityManager.CalculateSpecialEntityBounds(ent, size)
         else
             -- Regular special entities
             local bounds = RTXMath_CreateVector(size, size, size)
@@ -280,14 +261,8 @@ elseif ent:GetClass() == "hdri_cube_editor" then
 end
 
 local function BatchUpdateEntities(entities)
-    for _, ent in ipairs(entities) do
-        if IsValid(ent) then
-            local entPos = ent:GetPos()
-            if entPos and RTXMath_IsWithinBounds(entPos, mins, maxs) then
-                ent:SetRenderBounds(mins, maxs)
-            end
-        end
-    end
+    -- Call our native implementation
+    EntityManager.BatchUpdateEntityBounds(entities, mins, maxs)
 end
 
 -- Create clientside static props
@@ -304,28 +279,27 @@ local function CreateStaticProps()
     RunConsoleCommand("r_drawstaticprops", "0")
 
     local props = NikNaks.CurrentMap:GetStaticProps()
-
     local maxDistance = 16384
-    local maxDistSqr = maxDistance * maxDistance
     local playerPos = LocalPlayer():GetPos()
 
-    for _, propData in pairs(props) do
-        local propPos = propData:GetPos()
-        if RTXMath_DistToSqr(propPos, playerPos) <= maxDistSqr then
-            local prop = ClientsideModel(propData:GetModel())
-            if IsValid(prop) then
-                prop:SetPos(propPos)
-                prop:SetAngles(propData:GetAngles())
-                prop:SetRenderBounds(mins, maxs)
-                prop:SetColor(propData:GetColor())
-                prop:SetSkin(propData:GetSkin())
-                local scale = propData:GetScale()
-                if scale != 1 then
-                    prop:SetModelScale(scale)
-                end
-                prop:SetPredictable(false)
-                table.insert(staticProps, prop)
+    -- Get filtered props using native implementation
+    local filteredProps = EntityManager.FilterEntitiesByDistance(props, playerPos, maxDistance)
+
+    -- Process the filtered props
+    for _, propData in ipairs(filteredProps) do
+        local prop = ClientsideModel(propData:GetModel())
+        if IsValid(prop) then
+            prop:SetPos(propData:GetPos())
+            prop:SetAngles(propData:GetAngles())
+            prop:SetRenderBounds(mins, maxs)
+            prop:SetColor(propData:GetColor())
+            prop:SetSkin(propData:GetSkin())
+            local scale = propData:GetScale()
+            if scale != 1 then
+                prop:SetModelScale(scale)
             end
+            prop:SetPredictable(false)
+            table.insert(staticProps, prop)
         end
     end
 end

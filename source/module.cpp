@@ -9,6 +9,7 @@
 #include <d3d9.h>
 #include "rtx_lights/rtx_light_manager.h"
 #include "math/math.hpp"
+#include "entity_manager/entity_manager.hpp"
 #include "shader_fixes/shader_hooks.h"
 #include "prop_fixes.h" 
 
@@ -291,6 +292,7 @@ GMOD_MODULE_OPEN() {
             LUA->SetField(-2, "DrawRTXLights");
 
             RTXMath::Initialize(LUA);
+            EntityManager::Initialize(LUA);
 
         LUA->Pop();
 
