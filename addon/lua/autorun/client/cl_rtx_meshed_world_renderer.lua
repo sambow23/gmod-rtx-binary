@@ -49,6 +49,8 @@ end
 local function CalculateRegionBounds(vertices)
     local mins = Vector(math_huge, math_huge, math_huge)
     local maxs = Vector(-math_huge, -math_huge, -math_huge)
+    local vertCount = #vertices
+    local center = Vector(0, 0, 0)
     
     for _, vert in ipairs(vertices) do
         mins.x = math_min(mins.x, vert.x)
@@ -57,9 +59,39 @@ local function CalculateRegionBounds(vertices)
         maxs.x = math_max(maxs.x, vert.x)
         maxs.y = math_max(maxs.y, vert.y)
         maxs.z = math_max(maxs.z, vert.z)
+        center:Add(vert)
     end
     
-    return {mins = mins, maxs = maxs}
+    center:Div(vertCount)
+    
+    return {
+        mins = mins,
+        maxs = maxs,
+        center = center,
+        size = maxs - mins
+    }
+end
+
+local function IsRegionConnected(regionA, regionB)
+    local gap_threshold = 1024 -- Smaller threshold for direct connections
+    
+    -- Check if regions are directly adjacent or overlapping on any axis
+    local isConnectedX = (regionA.maxs.x + gap_threshold) >= regionB.mins.x and
+                        (regionB.maxs.x + gap_threshold) >= regionA.mins.x
+    local isConnectedY = (regionA.maxs.y + gap_threshold) >= regionB.mins.y and
+                        (regionB.maxs.y + gap_threshold) >= regionA.mins.y
+    local isConnectedZ = (regionA.maxs.z + gap_threshold) >= regionB.mins.z and
+                        (regionB.maxs.z + gap_threshold) >= regionA.mins.z
+    
+    -- Check if regions share a plane (like different floors of a building)
+    local sharesPlanXY = math.abs(regionA.center.z - regionB.center.z) < gap_threshold * 2
+    local sharesPlanXZ = math.abs(regionA.center.y - regionB.center.y) < gap_threshold * 2
+    local sharesPlanYZ = math.abs(regionA.center.x - regionB.center.x) < gap_threshold * 2
+    
+    return (isConnectedX and isConnectedY) or
+           (isConnectedY and isConnectedZ) or
+           (isConnectedX and isConnectedZ) or
+           sharesPlanXY or sharesPlanXZ or sharesPlanYZ
 end
 
 local function IsPointInRegion(point, region, tolerance)
@@ -71,14 +103,12 @@ end
 
 local function IdentifyMapRegions()
     boundingRegions = {}
-    local huge_gap_threshold = 8192 -- Only split on very large gaps
+    local initialRegions = {}
+    local processedCount = 0
     
-    print("[RTX Fixes] Starting region identification...")
+    print("[RTX Fixes] Starting intelligent region identification...")
     
-    -- First collect vertices and group them by major distance breaks
-    local vertexGroups = {{}}
-    local currentGroup = 1
-    
+    -- First pass: Create initial regions based on spatial proximity
     for _, leaf in pairs(NikNaks.CurrentMap:GetLeafs()) do
         if not leaf or leaf:IsOutsideMap() then continue end
         
@@ -91,64 +121,71 @@ local function IdentifyMapRegions()
             local vertices = face:GetVertexs()
             if not vertices or #vertices == 0 then continue end
             
-            -- Calculate face center
-            local center = Vector(0, 0, 0)
-            for _, vert in ipairs(vertices) do
-                center:Add(vert)
-            end
-            center:Div(#vertices)
-            
-            -- Check if this face is far from existing groups
-            local foundGroup = false
-            for i, group in ipairs(vertexGroups) do
-                if #group == 0 then
-                    table_insert(group, {center = center, face = face})
-                    foundGroup = true
-                    break
-                end
-                
-                -- Check distance to group's first vertex
-                local groupCenter = group[1].center
-                local dist = (center - groupCenter):Length()
-                
-                if dist < huge_gap_threshold then
-                    table_insert(group, {center = center, face = face})
-                    foundGroup = true
-                    break
-                end
-            end
-            
-            -- If no suitable group found, create new one
-            if not foundGroup then
-                vertexGroups[#vertexGroups + 1] = {{center = center, face = face}}
-            end
-        end
-    end
-    
-    -- Convert groups to regions
-    for _, group in ipairs(vertexGroups) do
-        if #group == 0 then continue end
-        
-        local vertices = {}
-        for _, data in ipairs(group) do
-            local faceVerts = data.face:GetVertexs()
-            if faceVerts then
-                for _, vert in ipairs(faceVerts) do
-                    table_insert(vertices, vert)
-                end
-            end
-        end
-        
-        if #vertices > 0 then
             local bounds = CalculateRegionBounds(vertices)
-            table_insert(boundingRegions, {
-                bounds = bounds,
-                center = (bounds.maxs + bounds.mins) / 2
-            })
+            
+            -- Find a region to merge with
+            local mergedWithExisting = false
+            for _, region in ipairs(initialRegions) do
+                if IsRegionConnected(bounds, region) then
+                    -- Expand existing region
+                    region.mins.x = math_min(region.mins.x, bounds.mins.x)
+                    region.mins.y = math_min(region.mins.y, bounds.mins.y)
+                    region.mins.z = math_min(region.mins.z, bounds.mins.z)
+                    region.maxs.x = math_max(region.maxs.x, bounds.maxs.x)
+                    region.maxs.y = math_max(region.maxs.y, bounds.maxs.y)
+                    region.maxs.z = math_max(region.maxs.z, bounds.maxs.z)
+                    region.size = region.maxs - region.mins
+                    region.center = (region.maxs + region.mins) / 2
+                    region.faceCount = (region.faceCount or 0) + 1
+                    mergedWithExisting = true
+                    break
+                end
+            end
+            
+            if not mergedWithExisting then
+                bounds.faceCount = 1
+                table_insert(initialRegions, bounds)
+            end
+            
+            processedCount = processedCount + 1
+            if processedCount % 5000 == 0 then
+                print(string.format("[RTX Fixes] Processed %d faces...", processedCount))
+            end
         end
     end
     
-    print(string.format("[RTX Fixes] Identified %d distinct regions", #boundingRegions))
+    -- Second pass: Merge connected regions and identify main play area
+    local mainRegion = nil
+    local maxFaces = 0
+    
+    -- Find the region with the most faces (likely the main play area)
+    for _, region in ipairs(initialRegions) do
+        if region.faceCount > maxFaces then
+            maxFaces = region.faceCount
+            mainRegion = region
+        end
+    end
+    
+    if mainRegion then
+        -- Only keep regions that are definitely separate from the main area
+        for _, region in ipairs(initialRegions) do
+            if region ~= mainRegion then
+                local distToMain = (region.center - mainRegion.center):Length()
+                local sizeRatio = region.size:Length() / mainRegion.size:Length()
+                
+                -- Keep region separate if:
+                -- 1. It's very far from the main region
+                -- 2. It's much smaller than the main region (likely a skybox or separate room)
+                -- 3. It's not connected to the main region
+                if (distToMain > 8192 and sizeRatio < 0.25) or
+                   (not IsRegionConnected(region, mainRegion) and distToMain > 4096) then
+                    table_insert(boundingRegions, region)
+                end
+            end
+        end
+    end
+    
+    print(string.format("[RTX Fixes] Identified main play area and %d separate regions", #boundingRegions))
 end
 
 local function IsInSeparateRegion(face)
