@@ -1,5 +1,3 @@
--- Add to your existing cl_rtx_meshed_world_renderer.lua or create new file
-
 local RTX_CLEANUP_HOOKS = {
     "InitPostEntity",
     "OnReloaded",
