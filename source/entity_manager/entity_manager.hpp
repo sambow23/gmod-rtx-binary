@@ -5,8 +5,65 @@
 #include <unordered_map>
 #include <vector>
 #include <random>
+#include <immintrin.h> // For SSE/AVX intrinsics
 
 namespace EntityManager {
+    // Single aligned allocator implementation
+    template<typename T>
+    class AlignedAllocator {
+    public:
+        using value_type = T;
+        using pointer = T*;
+        using const_pointer = const T*;
+        using reference = T&;
+        using const_reference = const T&;
+        using size_type = std::size_t;
+        using difference_type = std::ptrdiff_t;
+        static constexpr size_t alignment = 16;
+
+        template<typename U>
+        struct rebind {
+            using other = AlignedAllocator<U>;
+        };
+
+        AlignedAllocator() noexcept {}
+        template<typename U> AlignedAllocator(const AlignedAllocator<U>&) noexcept {}
+
+        pointer allocate(size_type n) {
+            if (n == 0) return nullptr;
+            void* ptr = _aligned_malloc(n * sizeof(T), alignment);
+            if (!ptr) throw std::bad_alloc();
+            return reinterpret_cast<T*>(ptr);
+        }
+
+        void deallocate(pointer p, size_type) noexcept {
+            _aligned_free(p);
+        }
+
+        template<typename U>
+        bool operator==(const AlignedAllocator<U>&) const noexcept { return true; }
+        
+        template<typename U>
+        bool operator!=(const AlignedAllocator<U>&) const noexcept { return false; }
+    };
+
+    // SIMD aligned structures
+    struct alignas(16) SIMDVertex {
+        __m128 pos;  // xyz position, w unused
+        __m128 norm; // xyz normal, w unused
+        __m128 uv;   // xy uv coords, zw unused
+    };
+
+    struct VertexBatch {
+        std::vector<SIMDVertex, AlignedAllocator<SIMDVertex>> vertices;
+        size_t currentSize;
+        static const size_t BATCH_SIZE = 1024; // Process 1024 vertices at a time
+        
+        VertexBatch() : currentSize(0) {
+            vertices.reserve(BATCH_SIZE);
+        }
+    };
+
     // Light type definitions
     enum LightType {
         LIGHT_POINT = 0,
@@ -15,13 +72,17 @@ namespace EntityManager {
     };
 
     struct BatchedMesh {
-        std::vector<Vector> positions;  // Changed to Source's Vector
-        std::vector<Vector> normals;    // Changed to Source's Vector
-        struct UV {                     // Added UV struct
+        std::vector<Vector> positions;
+        std::vector<Vector> normals;
+        struct UV {
             float u, v;
         };
-        std::vector<UV> uvs;           // Changed to UV struct
+        std::vector<UV> uvs;
         uint32_t vertexCount;
+        
+        // Add SIMD batch processing
+        void ProcessVertexBatchSIMD(const VertexBatch& batch);
+        static BatchedMesh CombineBatchesSIMD(const std::vector<BatchedMesh>& meshes);
     };
 
     // Light structure definition
@@ -55,9 +116,15 @@ namespace EntityManager {
                                        const std::vector<BatchedMesh::UV>& uvs,
                                        uint32_t maxVertices);
 
+    // SIMD processing functions
+    BatchedMesh ProcessVerticesSIMD(const std::vector<Vector>& vertices,
+                                   const std::vector<Vector>& normals,
+                                   const std::vector<BatchedMesh::UV>& uvs,
+                                   uint32_t maxVertices);
+
     bool ProcessRegionBatch(const std::vector<Vector>& vertices, 
-                        const Vector& playerPos,
-                        float threshold);
+                          const Vector& playerPos,
+                          float threshold);
 
     // Initialize entity manager
     void Initialize(GarrysMod::Lua::ILuaBase* LUA);

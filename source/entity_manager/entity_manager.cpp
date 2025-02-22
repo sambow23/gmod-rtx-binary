@@ -74,6 +74,66 @@ void AngleVectorsRadians(const QAngle& angles, Vector* forward, Vector* right, V
     }
 }
 
+BatchedMesh ProcessVerticesSIMD(const std::vector<Vector>& vertices,
+                               const std::vector<Vector>& normals,
+                               const std::vector<BatchedMesh::UV>& uvs,
+                               uint32_t maxVertices) {
+    BatchedMesh result;
+    result.vertexCount = 0;
+    
+    // Pre-allocate with alignment
+    const size_t vertCount = std::min(vertices.size(), static_cast<size_t>(maxVertices));
+    result.positions.reserve(vertCount);
+    result.normals.reserve(vertCount);
+    result.uvs.reserve(vertCount);
+
+    // Process in batches of 4 vertices (SSE)
+    for (size_t i = 0; i < vertCount; i += 4) {
+        __m128 positions[4];
+        __m128 norms[4];
+        __m128 uvCoords[4];
+        
+        // Load 4 vertices
+        for (size_t j = 0; j < 4 && (i + j) < vertCount; j++) {
+            const Vector& pos = vertices[i + j];
+            positions[j] = _mm_set_ps(0.0f, pos.z, pos.y, pos.x);
+            
+            if (i + j < normals.size()) {
+                const Vector& norm = normals[i + j];
+                norms[j] = _mm_set_ps(0.0f, norm.z, norm.y, norm.x);
+            }
+            
+            if (i + j < uvs.size()) {
+                const BatchedMesh::UV& uv = uvs[i + j];
+                uvCoords[j] = _mm_set_ps(0.0f, 0.0f, uv.v, uv.u);
+            }
+        }
+
+        // Process 4 vertices in parallel
+        for (size_t j = 0; j < 4 && (i + j) < vertCount; j++) {
+            // Transform position
+            float pos[4];
+            _mm_store_ps(pos, positions[j]);
+            result.positions.emplace_back(pos[0], pos[1], pos[2]);
+
+            // Transform normal
+            float norm[4];
+            _mm_store_ps(norm, norms[j]);
+            result.normals.emplace_back(norm[0], norm[1], norm[2]);
+
+            // Store UV
+            float uv[4];
+            _mm_store_ps(uv, uvCoords[j]);
+            result.uvs.push_back({uv[0], uv[1]});
+            
+            result.vertexCount++;
+        }
+    }
+
+    return result;
+}
+
+
 LUA_FUNCTION(CreateOptimizedMeshBatch_Native) {
     LUA->CheckType(1, Type::TABLE);  // vertices
     LUA->CheckType(2, Type::TABLE);  // normals
@@ -156,33 +216,7 @@ BatchedMesh CreateOptimizedMeshBatch(const std::vector<Vector>& vertices,
                                    const std::vector<Vector>& normals,
                                    const std::vector<BatchedMesh::UV>& uvs,
                                    uint32_t maxVertices) {
-    BatchedMesh result;
-    result.vertexCount = 0;
-
-    // Pre-allocate for efficiency
-    result.positions.reserve(maxVertices);
-    result.normals.reserve(maxVertices);
-    result.uvs.reserve(maxVertices);
-
-    // Process vertices in triangles
-    for (size_t i = 0; i < vertices.size() && result.vertexCount < maxVertices; i += 3) {
-        // Validate we have a complete triangle
-        if (i + 2 >= vertices.size()) break;
-
-        // Add vertices
-        for (size_t j = 0; j < 3; j++) {
-            result.positions.push_back(vertices[i + j]);
-            if (i + j < normals.size()) {
-                result.normals.push_back(normals[i + j]);
-            }
-            if (i + j < uvs.size()) {
-                result.uvs.push_back(uvs[i + j]);
-            }
-            result.vertexCount++;
-        }
-    }
-
-    return result;
+    return ProcessVerticesSIMD(vertices, normals, uvs, maxVertices);
 }
 
 LUA_FUNCTION(ProcessRegionBatch_Native) {
@@ -207,6 +241,72 @@ LUA_FUNCTION(ProcessRegionBatch_Native) {
     LUA->PushBool(result);
 
     return 1;
+}
+
+BatchedMesh BatchedMesh::CombineBatchesSIMD(const std::vector<BatchedMesh>& meshes) {
+    BatchedMesh combined;
+    size_t totalVerts = 0;
+    
+    // Calculate total size
+    for (const auto& mesh : meshes) {
+        totalVerts += mesh.vertexCount;
+    }
+    
+    // Pre-allocate
+    combined.positions.reserve(totalVerts);
+    combined.normals.reserve(totalVerts);
+    combined.uvs.reserve(totalVerts);
+    
+    // Combine using SIMD for 4 vertices at a time
+    std::vector<SIMDVertex, AlignedAllocator<SIMDVertex>> vertices;
+    vertices.reserve(totalVerts);
+    
+    for (const auto& mesh : meshes) {
+        for (size_t i = 0; i < mesh.vertexCount; i++) {
+            SIMDVertex vert;
+            vert.pos = _mm_set_ps(0.0f, 
+                                 mesh.positions[i].z,
+                                 mesh.positions[i].y, 
+                                 mesh.positions[i].x);
+            vert.norm = _mm_set_ps(0.0f,
+                                  mesh.normals[i].z,
+                                  mesh.normals[i].y,
+                                  mesh.normals[i].x);
+            vert.uv = _mm_set_ps(0.0f, 0.0f,
+                                mesh.uvs[i].v,
+                                mesh.uvs[i].u);
+            vertices.push_back(vert);
+        }
+    }
+    
+    // Process combined vertices in batches of 4
+    for (size_t i = 0; i < vertices.size(); i += 4) {
+        __m128 positions[4];
+        __m128 normals[4];
+        __m128 uvs[4];
+        
+        // Load 4 vertices
+        for (size_t j = 0; j < 4 && (i + j) < vertices.size(); j++) {
+            positions[j] = vertices[i + j].pos;
+            normals[j] = vertices[i + j].norm;
+            uvs[j] = vertices[i + j].uv;
+        }
+        
+        // Store processed vertices
+        for (size_t j = 0; j < 4 && (i + j) < vertices.size(); j++) {
+            float pos[4], norm[4], uv[4];
+            _mm_store_ps(pos, positions[j]);
+            _mm_store_ps(norm, normals[j]);
+            _mm_store_ps(uv, uvs[j]);
+            
+            combined.positions.emplace_back(pos[0], pos[1], pos[2]);
+            combined.normals.emplace_back(norm[0], norm[1], norm[2]);
+            combined.uvs.push_back({uv[0], uv[1]});
+            combined.vertexCount++;
+        }
+    }
+    
+    return combined;
 }
 
 bool ProcessRegionBatch(const std::vector<Vector>& vertices, 
