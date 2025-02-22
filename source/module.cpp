@@ -20,6 +20,7 @@ extern IMaterialSystem* materials = NULL;
 
 // extern IShaderAPI* g_pShaderAPI = NULL;
 remix::Interface* g_remix = nullptr;
+IDirect3DDevice9Ex* g_d3dDevice = nullptr;
 
 using namespace GarrysMod::Lua;
 
@@ -227,6 +228,48 @@ void* FindD3D9Device() {
     return device;
 }
 
+void ClearRemixResources() {
+    if (!g_remix) return;
+
+    // Force a new present cycle
+    remixapi_PresentInfo presentInfo = {};
+    g_remix->Present(&presentInfo);
+    
+    // Wait for GPU to finish
+    if (g_d3dDevice) {
+        g_d3dDevice->EvictManagedResources();
+    }
+}
+
+LUA_FUNCTION(ClearRTXResources_Native) {
+    try {
+        Msg("[RTX] Clearing RTX resources...\n");
+
+        if (g_remix) {
+            // Force cleanup through config
+            g_remix->SetConfigVariable("rtx.resourceLimits.forceCleanup", "1");
+            
+            // Force a new present cycle
+            remixapi_PresentInfo presentInfo = {};
+            g_remix->Present(&presentInfo);
+            
+            // Reset to normal cleanup behavior
+            g_remix->SetConfigVariable("rtx.resourceLimits.forceCleanup", "0");
+        }
+        
+        if (g_d3dDevice) {
+            g_d3dDevice->EvictManagedResources();
+        }
+
+        LUA->PushBool(true);
+        return 1;
+    } catch (...) {
+        Error("[RTX] Exception in ClearRTXResources\n");
+        LUA->PushBool(false);
+        return 1;
+    }
+}
+
 GMOD_MODULE_OPEN() { 
     try {
         Msg("[RTX Remix Fixes 2] - Module loaded!\n"); 
@@ -247,6 +290,14 @@ GMOD_MODULE_OPEN() {
         }
 
         g_remix->dxvk_RegisterD3D9Device(sourceDevice);
+
+        // Force clean state on startup
+        if (g_remix) {
+            // Set minimum resource settings
+            g_remix->SetConfigVariable("rtx.resourceLimits.maxCacheSize", "256");  // MB
+            g_remix->SetConfigVariable("rtx.resourceLimits.maxVRAM", "1024");     // MB
+            g_remix->SetConfigVariable("rtx.resourceLimits.forceCleanup", "1");
+        }
 
         // Setup frame rendering
         void** vTable = *reinterpret_cast<void***>(sourceDevice);
@@ -291,6 +342,9 @@ GMOD_MODULE_OPEN() {
             LUA->PushCFunction(DrawRTXLights);
             LUA->SetField(-2, "DrawRTXLights");
 
+            LUA->PushCFunction(ClearRTXResources_Native);
+            LUA->SetField(-2, "ClearRTXResources");
+
             RTXMath::Initialize(LUA);
             EntityManager::Initialize(LUA);
 
@@ -326,6 +380,8 @@ GMOD_MODULE_CLOSE() {
             delete g_remix;
             g_remix = nullptr;
         }
+
+        g_d3dDevice = nullptr;
 
         Msg("[RTX] Module shutdown complete\n");
         return 0;
