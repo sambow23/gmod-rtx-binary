@@ -29,6 +29,8 @@ local MAX_VERTICES = 10000
 local MAX_CHUNK_VERTS = 32768
 local boundingRegions = {}
 local isDrawingSkybox = false
+local lastSkyState = GetConVar("r_3dsky"):GetBool()
+local disclaimerShown = false
 
 
 -- Pre-allocate common vectors and tables for reuse
@@ -682,3 +684,49 @@ end)
 
 -- Console Commands
 concommand.Add("rtx_rebuild_meshes", BuildMapMeshes)
+
+------ r_3dsky disclaimer ------
+local function ShowSkyDisclaimer()
+    if disclaimerShown then return end
+    disclaimerShown = true
+
+    local frame = vgui.Create("DFrame")
+    frame:SetSize(400, 150)
+    frame:Center()
+    frame:SetTitle("3D Sky Warning")
+    frame:MakePopup()
+
+    local label = vgui.Create("DLabel", frame)
+    label:SetPos(20, 30)
+    label:SetSize(360, 60)
+    label:SetWrap(true)
+    label:SetText("Warning: Enabling r_3dsky may cause visual artifacts with the custom renderer. It's recommended to keep it disabled for the best experience.")
+
+    local button = vgui.Create("DButton", frame)
+    button:SetText("OK")
+    button:SetPos(150, 100)
+    button:SetSize(100, 30)
+    button:SetTextColor(Color(255, 255, 255))
+    button.DoClick = function()
+        frame:Remove()
+    end
+end
+
+hook.Add("Think", "RTXSkyMonitor", function()
+    local currentSkyState = GetConVar("r_3dsky"):GetBool()
+    
+    if currentSkyState ~= lastSkyState then
+        lastSkyState = currentSkyState
+        
+        if currentSkyState then
+            ShowSkyDisclaimer()
+        else
+            disclaimerShown = false -- Reset disclaimer state when disabled
+        end
+    end
+end)
+
+hook.Add("ShutDown", "RTXSkyMonitor", function()
+
+    hook.Remove("Think", "RTXSkyMonitor")
+end)
