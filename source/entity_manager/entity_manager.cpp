@@ -74,6 +74,178 @@ void AngleVectorsRadians(const QAngle& angles, Vector* forward, Vector* right, V
     }
 }
 
+LUA_FUNCTION(CreateOptimizedMeshBatch_Native) {
+    LUA->CheckType(1, Type::TABLE);  // vertices
+    LUA->CheckType(2, Type::TABLE);  // normals
+    LUA->CheckType(3, Type::TABLE);  // uvs
+    uint32_t maxVertices = LUA->CheckNumber(4);
+
+    std::vector<Vector> vertices;
+    std::vector<Vector> normals;
+    std::vector<BatchedMesh::UV> uvs;
+
+    // Parse vertices table
+    LUA->PushNil();
+    while (LUA->Next(1) != 0) {
+        if (LUA->IsType(-1, Type::Vector)) {
+            Vector* v = LUA->GetUserType<Vector>(-1, Type::Vector);
+            vertices.push_back(*v);
+        }
+        LUA->Pop();
+    }
+
+    // Parse normals table
+    LUA->PushNil();
+    while (LUA->Next(2) != 0) {
+        if (LUA->IsType(-1, Type::Vector)) {
+            Vector* n = LUA->GetUserType<Vector>(-1, Type::Vector);
+            normals.push_back(*n);
+        }
+        LUA->Pop();
+    }
+
+    // Parse UVs table
+    LUA->PushNil();
+    while (LUA->Next(3) != 0) {
+        if (LUA->IsType(-1, Type::Vector)) {
+            Vector* uv = LUA->GetUserType<Vector>(-1, Type::Vector);
+            uvs.push_back({uv->x, uv->y});  // Only use x,y for UVs
+        }
+        LUA->Pop();
+    }
+
+    BatchedMesh result = CreateOptimizedMeshBatch(vertices, normals, uvs, maxVertices);
+
+    // Create return table with the same structure as before
+    LUA->CreateTable();
+    
+    // Add vertices
+    LUA->CreateTable();
+    for (size_t i = 0; i < result.positions.size(); i++) {
+        LUA->PushNumber(i + 1);
+        Vector* v = new Vector(result.positions[i]);
+        LUA->PushUserType(v, Type::Vector);
+        LUA->SetTable(-3);
+    }
+    LUA->SetField(-2, "vertices");
+
+    // Add normals
+    LUA->CreateTable();
+    for (size_t i = 0; i < result.normals.size(); i++) {
+        LUA->PushNumber(i + 1);
+        Vector* n = new Vector(result.normals[i]);
+        LUA->PushUserType(n, Type::Vector);
+        LUA->SetTable(-3);
+    }
+    LUA->SetField(-2, "normals");
+
+    // Add UVs
+    LUA->CreateTable();
+    for (size_t i = 0; i < result.uvs.size(); i++) {
+        LUA->PushNumber(i + 1);
+        Vector* uv = new Vector(result.uvs[i].u, result.uvs[i].v, 0);
+        LUA->PushUserType(uv, Type::Vector);
+        LUA->SetTable(-3);
+    }
+    LUA->SetField(-2, "uvs");
+
+    return 1;
+}
+
+BatchedMesh CreateOptimizedMeshBatch(const std::vector<Vector>& vertices,
+                                   const std::vector<Vector>& normals,
+                                   const std::vector<BatchedMesh::UV>& uvs,
+                                   uint32_t maxVertices) {
+    BatchedMesh result;
+    result.vertexCount = 0;
+
+    // Pre-allocate for efficiency
+    result.positions.reserve(maxVertices);
+    result.normals.reserve(maxVertices);
+    result.uvs.reserve(maxVertices);
+
+    // Process vertices in triangles
+    for (size_t i = 0; i < vertices.size() && result.vertexCount < maxVertices; i += 3) {
+        // Validate we have a complete triangle
+        if (i + 2 >= vertices.size()) break;
+
+        // Add vertices
+        for (size_t j = 0; j < 3; j++) {
+            result.positions.push_back(vertices[i + j]);
+            if (i + j < normals.size()) {
+                result.normals.push_back(normals[i + j]);
+            }
+            if (i + j < uvs.size()) {
+                result.uvs.push_back(uvs[i + j]);
+            }
+            result.vertexCount++;
+        }
+    }
+
+    return result;
+}
+
+LUA_FUNCTION(ProcessRegionBatch_Native) {
+    LUA->CheckType(1, Type::TABLE);  // vertices
+    LUA->CheckType(2, Type::Vector); // player position
+    float threshold = LUA->CheckNumber(3);
+
+    Vector* playerPos = LUA->GetUserType<Vector>(2, Type::Vector);
+    std::vector<Vector> vertices;  // Changed to Source Vector
+
+    // Parse vertices table
+    LUA->PushNil();
+    while (LUA->Next(1) != 0) {
+        if (LUA->IsType(-1, Type::Vector)) {
+            Vector* v = LUA->GetUserType<Vector>(-1, Type::Vector);
+            vertices.push_back(*v);  // Copy the vector
+        }
+        LUA->Pop();
+    }
+
+    bool result = ProcessRegionBatch(vertices, *playerPos, threshold);
+    LUA->PushBool(result);
+
+    return 1;
+}
+
+bool ProcessRegionBatch(const std::vector<Vector>& vertices, 
+                       const Vector& playerPos,
+                       float threshold) {
+    if (vertices.empty()) return false;
+
+    // Calculate region bounds
+    Vector mins(FLT_MAX, FLT_MAX, FLT_MAX);
+    Vector maxs(-FLT_MAX, -FLT_MAX, -FLT_MAX);
+
+    for (const auto& vertex : vertices) {
+        mins.x = std::min(mins.x, vertex.x);
+        mins.y = std::min(mins.y, vertex.y);
+        mins.z = std::min(mins.z, vertex.z);
+        maxs.x = std::max(maxs.x, vertex.x);
+        maxs.y = std::max(maxs.y, vertex.y);
+        maxs.z = std::max(maxs.z, vertex.z);
+    }
+
+    // Create expanded bounds
+    Vector expandedMins(
+        mins.x - threshold,
+        mins.y - threshold,
+        mins.z - threshold
+    );
+    
+    Vector expandedMaxs(
+        maxs.x + threshold,
+        maxs.y + threshold,
+        maxs.z + threshold
+    );
+
+    // Check if player is within expanded bounds
+    return (playerPos.x >= expandedMins.x && playerPos.x <= expandedMaxs.x &&
+            playerPos.y >= expandedMins.y && playerPos.y <= expandedMaxs.y &&
+            playerPos.z >= expandedMins.z && playerPos.z <= expandedMaxs.z);
+}
+
 LUA_FUNCTION(CalculateSpecialEntityBounds_Native) {
     LUA->CheckType(1, Type::Entity);
     LUA->CheckNumber(2);  // size
@@ -433,6 +605,12 @@ void Initialize(ILuaBase* LUA) {
 
     LUA->PushCFunction(GetRandomLights_Native);
     LUA->SetField(-2, "GetRandomLights");
+
+    LUA->PushCFunction(CreateOptimizedMeshBatch_Native);
+    LUA->SetField(-2, "CreateOptimizedMeshBatch");
+
+    LUA->PushCFunction(ProcessRegionBatch_Native);
+    LUA->SetField(-2, "ProcessRegionBatch");
 
     LUA->SetField(-2, "EntityManager");
 }

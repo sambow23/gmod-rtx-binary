@@ -194,31 +194,7 @@ local function IsInSeparateRegion(face)
     local vertices = face:GetVertexs()
     if not vertices or #vertices == 0 then return false end
     
-    -- Calculate face center
-    local center = Vector(0, 0, 0)
-    for _, vert in ipairs(vertices) do
-        center:Add(vert)
-    end
-    center:Div(#vertices)
-    
-    -- Get player position
-    local playerPos = LocalPlayer():GetPos()
-    local tolerance = 256 -- Add some tolerance to prevent edge cases
-    
-    -- Find which region contains the player
-    local playerRegion = nil
-    for _, region in ipairs(boundingRegions) do
-        if IsPointInRegion(playerPos, region.bounds, tolerance) then
-            playerRegion = region
-            break
-        end
-    end
-    
-    if not playerRegion then return false end
-    
-    -- Check if face is in a different region than the player
-    -- and if that region is significantly far from the player's region
-    return not IsPointInRegion(center, playerRegion.bounds, tolerance)
+    return EntityManager.ProcessRegionBatch(vertices, LocalPlayer():GetPos(), 256)
 end
 
 local function ValidateVertex(pos)
@@ -298,52 +274,41 @@ local function DetermineOptimalChunkSize(totalFaces)
 end
 
 local function CreateMeshBatch(vertices, material, maxVertsPerMesh)
+    local vertexData = {
+        positions = {},
+        normals = {},
+        uvs = {}
+    }
+    
+    -- Collect vertex data
+    for _, vert in ipairs(vertices) do
+        table.insert(vertexData.positions, vert.pos)
+        table.insert(vertexData.normals, vert.normal)
+        table.insert(vertexData.uvs, Vector(vert.u or 0, vert.v or 0, 0))
+    end
+    
+    -- Get optimized batch from native code
+    local batch = EntityManager.CreateOptimizedMeshBatch(
+        vertexData.positions,
+        vertexData.normals,
+        vertexData.uvs,
+        maxVertsPerMesh
+    )
+    
+    -- Create mesh from optimized data
     local meshes = {}
-    local currentVerts = {}
-    local vertCount = 0
+    local newMesh = Mesh(material)
     
-    for i = 1, #vertices, 3 do -- Process in triangles
-        -- Add all three vertices of the triangle
-        for j = 0, 2 do
-            if vertices[i + j] then
-                table_insert(currentVerts, vertices[i + j])
-                vertCount = vertCount + 1
-            end
-        end
-        
-        -- Create new mesh when we hit the vertex limit
-        if vertCount >= maxVertsPerMesh - 3 then -- Leave room for one more triangle
-            local newMesh = Mesh(material)
-            mesh.Begin(newMesh, MATERIAL_TRIANGLES, #currentVerts)
-            for _, vert in ipairs(currentVerts) do
-                mesh.Position(vert.pos)
-                mesh.Normal(vert.normal)
-                mesh.TexCoord(0, vert.u or 0, vert.v or 0)
-                mesh.AdvanceVertex()
-            end
-            mesh.End()
-            
-            table_insert(meshes, newMesh)
-            currentVerts = {}
-            vertCount = 0
-        end
+    mesh.Begin(newMesh, MATERIAL_TRIANGLES, #batch.vertices)
+    for i = 1, #batch.vertices do
+        mesh.Position(batch.vertices[i])
+        mesh.Normal(batch.normals[i])
+        mesh.TexCoord(0, batch.uvs[i].x, batch.uvs[i].y)
+        mesh.AdvanceVertex()
     end
+    mesh.End()
     
-    -- Handle remaining vertices
-    if #currentVerts > 0 then
-        local newMesh = Mesh(material)
-        mesh.Begin(newMesh, MATERIAL_TRIANGLES, #currentVerts)
-        for _, vert in ipairs(currentVerts) do
-            mesh.Position(vert.pos)
-            mesh.Normal(vert.normal)
-            mesh.TexCoord(0, vert.u or 0, vert.v or 0)
-            mesh.AdvanceVertex()
-        end
-        mesh.End()
-        
-        table_insert(meshes, newMesh)
-    end
-    
+    table.insert(meshes, newMesh)
     return meshes
 end
 
