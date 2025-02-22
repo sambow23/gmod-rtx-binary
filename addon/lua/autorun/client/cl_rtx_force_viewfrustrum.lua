@@ -69,7 +69,12 @@ local REGULAR_LIGHT_TYPES = {
 
 local SPECIAL_ENTITY_BOUNDS = {
     ["prop_door_rotating"] = {
-        size = 256, -- Default size for doors
+        size = 512, -- Default size for doors
+        description = "Door entities", -- For debug/documentation
+    },
+
+    ["func_door_rotating"] = {
+        size = 512, -- Default size for doors
         description = "Door entities", -- For debug/documentation
     }
     -- Add more entities here as needed:
@@ -276,7 +281,7 @@ local function CreateStaticProps()
     if not (cv_enabled:GetBool() and NikNaks and NikNaks.CurrentMap) then return end
 
     -- Disable engine props before creating our own
-    RunConsoleCommand("r_drawstaticprops", "0")
+    RunConsoleCommand("r_drawstaticprops", "1")
 
     local props = NikNaks.CurrentMap:GetStaticProps()
 
@@ -361,7 +366,7 @@ cvars.AddChangeCallback("fr_enabled", function(_, _, new)
         CreateStaticProps()
         
         -- Disable engine static props when enabled
-        RunConsoleCommand("r_drawstaticprops", "0")
+        RunConsoleCommand("r_drawstaticprops", "1")
     else
         UpdateAllEntities(true)
         -- Remove static props
