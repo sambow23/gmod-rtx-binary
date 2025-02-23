@@ -107,65 +107,51 @@ GMOD_MODULE_OPEN() {
     try {
         Msg("[RTX Remix Fixes 2] - Module loaded!\n"); 
 
-        // Find Source's D3D9 device
-        auto sourceDevice = static_cast<IDirect3DDevice9Ex*>(FindD3D9Device());
-        if (!sourceDevice) {
-            LUA->ThrowError("[RTX] Failed to find D3D9 device");
-            return 0;
-        }
-
-        // Initialize Remix
+        // Initialize Remix properly
         if (auto interf = remix::lib::loadRemixDllAndInitialize(L"d3d9.dll")) {
             g_remix = new remix::Interface{ *interf };
-        }
-        else {
-            LUA->ThrowError("[RTX Remix Fixes 2] - remix::loadRemixDllAndInitialize() failed"); 
-        }
 
-        g_remix->dxvk_RegisterD3D9Device(sourceDevice);
+            // Initialize with proper startup info
+            remixapi_StartupInfo startupInfo = {};
+            startupInfo.sType = REMIXAPI_STRUCT_TYPE_STARTUP_INFO;
+            startupInfo.hwnd = NULL; // We'll use the game's window
+            startupInfo.disableSrgbConversionForOutput = false;
+            startupInfo.forceNoVkSwapchain = false;
+            
+            if (auto result = g_remix->Startup(startupInfo)) {
+                // Find and register Source's D3D9 device
+                auto sourceDevice = static_cast<IDirect3DDevice9Ex*>(FindD3D9Device());
+                if (!sourceDevice) {
+                    LUA->ThrowError("[RTX] Failed to find D3D9 device");
+                    return 0;
+                }
 
-        // Force clean state on startup
-        if (g_remix) {
-            // Set minimum resource settings
-            g_remix->SetConfigVariable("rtx.resourceLimits.maxCacheSize", "256");  // MB
-            g_remix->SetConfigVariable("rtx.resourceLimits.maxVRAM", "1024");     // MB
-            g_remix->SetConfigVariable("rtx.resourceLimits.forceCleanup", "1");
-        }
+                g_remix->dxvk_RegisterD3D9Device(sourceDevice);
 
-        // Initialize RTX Light Manager
-        if (!RTXLightManager::Instance().Initialize()) {
-        LUA->ThrowError("[RTX] Failed to initialize RTX Light Manager");
-        return 0;
-        }
+                // Configure RTX settings
+                g_remix->SetConfigVariable("rtx.enableAdvancedMode", "1");
+                g_remix->SetConfigVariable("rtx.fallbackLightMode", "2");
 
-        RTXLightManager::RegisterLuaFunctions(LUA);
+                // Initialize RTX Light Manager
+                if (!RTXLightManager::Instance().Initialize()) {
+                    LUA->ThrowError("[RTX] Failed to initialize RTX Light Manager");
+                    return 0;
+                }
 
-        // Setup frame rendering
-        void** vTable = *reinterpret_cast<void***>(sourceDevice);
-        Present_Original = reinterpret_cast<Present_t>(vTable[17]); // Present is at index 17
-
-        // Setup hook
-        DWORD oldProtect;
-        VirtualProtect(vTable + 17, sizeof(void*), PAGE_EXECUTE_READWRITE, &oldProtect);
-        vTable[17] = reinterpret_cast<void*>(&Present_Hook);
-        VirtualProtect(vTable + 17, sizeof(void*), oldProtect, &oldProtect);
-
-        // Configure RTX settings
-        if (g_remix) {
-            g_remix->SetConfigVariable("rtx.enableAdvancedMode", "1");
-            g_remix->SetConfigVariable("rtx.fallbackLightMode", "2");
-            Msg("[RTX Remix Fixes] RTX configuration set\n");
+                RTXLightManager::RegisterLuaFunctions(LUA);
+            } else {
+                LUA->ThrowError("[RTX] Failed to start Remix Runtime");
+            }
+        } else {
+            LUA->ThrowError("[RTX] Failed to initialize Remix API");
         }
 
-        // Register Lua functions
+        // Register other Lua functions
         LUA->PushSpecial(GarrysMod::Lua::SPECIAL_GLOB); 
-
-            LUA->PushCFunction(ClearRTXResources_Native);
-            LUA->SetField(-2, "ClearRTXResources");
-
-            RTXMath::Initialize(LUA);
-            EntityManager::Initialize(LUA);
-
+        LUA->PushCFunction(ClearRTXResources_Native);
+        LUA->SetField(-2, "ClearRTXResources");
+        RTXMath::Initialize(LUA);
+        EntityManager::Initialize(LUA);
         LUA->Pop();
 
         return 0;

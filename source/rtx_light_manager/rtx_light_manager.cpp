@@ -126,24 +126,29 @@ void RTXLightManager::Cleanup() {
 bool RTXLightManager::CreateSphereLight(float x, float y, float z, float radius,
                                       float r, float g, float b, float intensity,
                                       uint64_t& outLightId) {
-  if (!g_remix) return false;
+    if (!g_remix) return false;
 
-  remix::LightInfoSphereEXT sphereLight;
-  sphereLight.position = {x, y, z};
-  sphereLight.radius = radius;
+    // Create a unique hash for this light
+    uint64_t lightHash = m_nextLightId++;
 
-  remix::LightInfo lightInfo;
-  lightInfo.pNext = &sphereLight;
-  lightInfo.hash = m_nextLightId++;
-  lightInfo.radiance = {r * intensity, g * intensity, b * intensity};
+    remix::LightInfoSphereEXT sphereLight;
+    sphereLight.sType = REMIXAPI_STRUCT_TYPE_LIGHT_INFO_SPHERE_EXT;
+    sphereLight.position = {x, y, z};
+    sphereLight.radius = radius;
 
-  auto result = g_remix->CreateLight(lightInfo);
-  if (result) {
-    m_lights[lightInfo.hash] = result.value();
-    outLightId = lightInfo.hash;
-    return true;
-  }
-  return false;
+    remix::LightInfo lightInfo;
+    lightInfo.sType = REMIXAPI_STRUCT_TYPE_LIGHT_INFO;
+    lightInfo.pNext = &sphereLight;
+    lightInfo.hash = lightHash;  // Use our unique hash
+    lightInfo.radiance = {r * intensity, g * intensity, b * intensity};
+
+    auto result = g_remix->CreateLight(lightInfo);
+    if (result) {
+        m_lights[lightHash] = result.value();
+        outLightId = lightHash;
+        return true;
+    }
+    return false;
 }
 
 bool RTXLightManager::CreateRectLight(float x, float y, float z,
