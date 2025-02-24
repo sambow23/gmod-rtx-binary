@@ -8,7 +8,8 @@ local CONVARS = {
     ENABLED = CreateClientConVar("rtx_force_render", "1", true, false, "Forces custom mesh rendering of map"),
     DEBUG = CreateClientConVar("rtx_force_render_debug", "0", true, false, "Shows debug info for mesh rendering"),
     CHUNK_SIZE = CreateClientConVar("rtx_chunk_size", "65536", true, false, "Size of chunks for mesh combining"),
-    CAPTURE_MODE = CreateClientConVar("rtx_capture_mode", "0", true, false, "Toggles r_drawworld for capture mode")
+    CAPTURE_MODE = CreateClientConVar("rtx_capture_mode", "0", true, false, "Toggles r_drawworld for capture mode"),
+    BOUNDS_PADDING = CreateClientConVar("rtx_bounds_padding", "128", true, false, "Padding added to map bounds for geometry inclusion")
 }
 
 -- Local Variables and Caches
@@ -31,7 +32,11 @@ local boundingRegions = {}
 local isDrawingSkybox = false
 local lastSkyState = GetConVar("r_3dsky"):GetBool()
 local disclaimerShown = false
-
+local visLeafs = {}
+local skyboxOrigin = nil
+local SKYBOX_SCALE = 16 -- Source engine's 3D skybox scale factor
+local mapOrigin = Vector(0, 0, 0)
+local mapScale = 1
 
 -- Pre-allocate common vectors and tables for reuse
 local vertexBuffer = {
@@ -39,6 +44,184 @@ local vertexBuffer = {
     normals = {},
     uvs = {}
 }
+
+local mapBounds = {
+    mins = Vector(0, 0, 0),
+    maxs = Vector(0, 0, 0),
+    initialized = false
+}
+
+local function InitializeMapBounds()
+    if mapBounds.initialized then return end
+    
+    local mins = Vector(math_huge, math_huge, math_huge)
+    local maxs = Vector(-math_huge, -math_huge, -math_huge)
+    local validFaceCount = 0
+    
+    -- Find sky_camera for 3D skybox reference and scale
+    local skyCam = ents.FindByClass("sky_camera")[1]
+    if skyCam then
+        skyboxOrigin = skyCam:GetPos()
+        -- Calculate map origin relative to skybox
+        mapOrigin = skyboxOrigin * SKYBOX_SCALE
+    end
+    
+    -- First pass: determine the main play area scale
+    if NikNaks and NikNaks.CurrentMap then
+        local allVertices = {}
+        
+        for _, leaf in pairs(NikNaks.CurrentMap:GetLeafs()) do
+            if not leaf or leaf:IsOutsideMap() then continue end
+            
+            local leafFaces = leaf:GetFaces(true)
+            if not leafFaces then continue end
+            
+            for _, face in pairs(leafFaces) do
+                if not face or face:IsDisplacement() then continue end
+                
+                local vertices = face:GetVertexs()
+                if not vertices then continue end
+                
+                local material = face:GetMaterial()
+                if not material then continue end
+                
+                local matName = material:GetName():lower()
+                -- Skip obvious skybox materials
+                if matName:find("tools/toolsskybox") or
+                   matName:find("skybox/") or
+                   matName:find("sky_") then
+                    continue
+                end
+                
+                for _, vert in ipairs(vertices) do
+                    if type(vert) == "Vector" then
+                        table_insert(allVertices, vert)
+                    end
+                end
+            end
+        end
+        
+        -- Calculate main play area bounds
+        if #allVertices > 0 then
+            for _, vert in ipairs(allVertices) do
+                -- Skip vertices that are clearly in skybox space
+                if math.abs(vert.x) > 16384 or
+                   math.abs(vert.y) > 16384 or
+                   math.abs(vert.z) > 16384 then
+                    continue
+                end
+                
+                mins.x = math_min(mins.x, vert.x)
+                mins.y = math_min(mins.y, vert.y)
+                mins.z = math_min(mins.z, vert.z)
+                maxs.x = math_max(maxs.x, vert.x)
+                maxs.y = math_max(maxs.y, vert.y)
+                maxs.z = math_max(maxs.z, vert.z)
+                validFaceCount = validFaceCount + 1
+            end
+        end
+    end
+    
+    -- Calculate map scale based on bounds
+    local size = maxs - mins
+    mapScale = math_max(size.x, size.y, size.z) / 16384 -- Normalize to typical map size
+    
+    -- Add scaled padding to the bounds
+    local padding = Vector(256, 256, 256) * mapScale
+    mapBounds.mins = mins - padding
+    mapBounds.maxs = maxs + padding
+    mapBounds.initialized = true
+    mapBounds.center = (maxs + mins) / 2
+    mapBounds.size = size
+    
+    print(string.format("[RTX Fixes] Map analysis complete:"))
+    print(string.format("- Bounds: Mins (%.1f, %.1f, %.1f) Maxs (%.1f, %.1f, %.1f)",
+        mins.x, mins.y, mins.z, maxs.x, maxs.y, maxs.z))
+    print(string.format("- Scale: %.2f", mapScale))
+    print(string.format("- Valid faces: %d", validFaceCount))
+end
+
+local function InitializeSkyboxData()
+    skyboxOrigin = nil
+    visLeafs = {}
+    
+    -- Find sky_camera entity for 3D skybox reference
+    local skyCam = ents.FindByClass("sky_camera")[1]
+    if skyCam then
+        skyboxOrigin = skyCam:GetPos()
+    end
+end
+
+local function IsFaceInSkybox(face)
+    if not face then return false end
+    
+    local vertices = face:GetVertexs()
+    if not vertices or #vertices == 0 then return false end
+    
+    local center = Vector(0, 0, 0)
+    local vertCount = #vertices
+    local outsideCount = 0
+    local maxDist = 0
+    
+    -- Calculate center and check vertices
+    for _, vert in ipairs(vertices) do
+        if type(vert) ~= "Vector" then continue end
+        
+        -- Check if vertex is outside main play area bounds
+        if vert.x < mapBounds.mins.x or vert.x > mapBounds.maxs.x or
+           vert.y < mapBounds.mins.y or vert.y > mapBounds.maxs.y or
+           vert.z < mapBounds.mins.z or vert.z > mapBounds.maxs.z then
+            outsideCount = outsideCount + 1
+        end
+        
+        -- Track maximum distance from map center
+        local dist = (vert - mapBounds.center):Length()
+        maxDist = math_max(maxDist, dist)
+        
+        center:Add(vert)
+    end
+    
+    center:Div(vertCount)
+    
+    -- Check various conditions that would indicate skybox geometry
+    local isSkybox = false
+    
+    -- 1. Check if most vertices are outside bounds
+    if outsideCount > (vertCount * 0.5) then
+        isSkybox = true
+    end
+    
+    -- 2. Check distance from map center (scaled by map size)
+    local maxAllowedDist = mapBounds.size:Length() * 0.6
+    if maxDist > maxAllowedDist then
+        isSkybox = true
+    end
+    
+    -- 3. Check if in 3D skybox area
+    if skyboxOrigin and center:Distance(skyboxOrigin) < 4096 then
+        isSkybox = true
+    end
+    
+    -- 4. Check if potentially in 2D skybox
+    if math.abs(center.x) > mapBounds.size.x * 0.75 or
+       math.abs(center.y) > mapBounds.size.y * 0.75 or
+       math.abs(center.z) > mapBounds.size.z * 0.75 then
+        isSkybox = true
+    end
+    
+    -- 5. Check material
+    local material = face:GetMaterial()
+    if material then
+        local matName = material:GetName():lower()
+        if matName:find("tools/toolsskybox") or
+           matName:find("skybox/") or
+           matName:find("sky_") then
+            isSkybox = true
+        end
+    end
+    
+    return isSkybox
+end
 
 local function MapTable(tbl, func)
     local mapped = {}
@@ -212,6 +395,41 @@ local function ValidateVertex(pos)
     return true
 end
 
+local function IsInSkybox(vertices)
+    -- Check if vertices are in typical skybox coordinates
+    -- 2D skybox is usually very far away, 3D skybox is usually at specific coordinates
+    local center = Vector(0, 0, 0)
+    for _, vert in ipairs(vertices) do
+        center:Add(vert)
+    end
+    center:Div(#vertices)
+    
+    -- Check for 2D skybox (very far coordinates)
+    if math.abs(center.x) > 16384 or
+       math.abs(center.y) > 16384 or
+       math.abs(center.z) > 16384 then
+        return true
+    end
+    
+    -- Check for 3D skybox (usually near origin but at specific scale)
+    -- 3D skybox is typically scaled down by factor of 16
+    local skybox3DOrigin = Vector(0, 0, 0)
+    local distToOrigin = center:Distance(skybox3DOrigin)
+    if distToOrigin < 2048 then -- 3D skyboxes are usually within this range
+        -- Additional check for typical 3D skybox area
+        local bounds = ents.FindByClass("sky_camera")[1]
+        if bounds then
+            local skyOrigin = bounds:GetPos()
+            local distToSky = center:Distance(skyOrigin)
+            if distToSky < 4096 then -- If close to sky_camera
+                return true
+            end
+        end
+    end
+    
+    return false
+end
+
 local function IsBrushEntity(face)
     if not face then return false end
     
@@ -233,15 +451,24 @@ end
 local function IsSkyboxFace(face)
     if not face then return false end
     
+    -- Check material first
     local material = face:GetMaterial()
     if not material then return false end
     
     local matName = material:GetName():lower()
+    if matName:find("tools/toolsskybox") or
+       matName:find("skybox/") or
+       matName:find("sky_") then
+        return true
+    end
     
-    return matName:find("tools/toolsskybox") or
-           matName:find("skybox/") or
-           matName:find("sky_") or
-           false
+    -- Check vertices location
+    local vertices = face:GetVertexs()
+    if vertices and #vertices > 0 then
+        return IsInSkybox(vertices)
+    end
+    
+    return false
 end
 
 local function SplitChunk(faces, chunkSize)
@@ -376,11 +603,11 @@ local function BuildMapMeshes()
     
         for _, face in pairs(leafFaces) do
             if not face or 
-               face:IsDisplacement() or -- Skip displacements early
+               face:IsDisplacement() or
                IsBrushEntity(face) or
                not face:ShouldRender() or 
-               IsSkyboxFace(face) or
-               IsInSeparateRegion(face) then -- New region check here
+               IsFaceInSkybox(face) or -- Updated check
+               IsInSeparateRegion(face) then
                 continue 
             end
             
@@ -511,9 +738,16 @@ end
 -- Rendering Functions
 local function RenderCustomWorld(translucent)
     if not isEnabled then return end
-
+    
     local draws = 0
     local currentMaterial = nil
+    
+    -- Get player view information
+    local ply = LocalPlayer()
+    if not IsValid(ply) then return end
+    
+    local viewPos = ply:EyePos()
+    local viewDir = ply:GetAimVector()
     
     -- Inline render state changes for speed
     if translucent then
@@ -521,14 +755,19 @@ local function RenderCustomWorld(translucent)
         render.OverrideDepthEnable(true, true)
     end
     
-    -- Regular faces
+    -- Regular faces with visibility check
     local groups = translucent and mapMeshes.translucent or mapMeshes.opaque
     for _, chunkMaterials in pairs(groups) do
         for _, group in pairs(chunkMaterials) do
+            -- Skip if material or meshes are invalid
+            if not group.material or not group.meshes then continue end
+            
+            -- Only render if chunk is potentially visible
             if currentMaterial ~= group.material then
                 render.SetMaterial(group.material)
                 currentMaterial = group.material
             end
+            
             local meshes = group.meshes
             for i = 1, #meshes do
                 meshes[i]:Draw()
@@ -602,6 +841,8 @@ end
 
 -- Initialization and Cleanup
 local function Initialize()
+    InitializeMapBounds()
+    
     local success, err = pcall(BuildMapMeshes)
     if not success then
         ErrorNoHalt("[RTX Fixes] Failed to build meshes: " .. tostring(err) .. "\n")
