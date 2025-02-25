@@ -7,6 +7,7 @@
 #include "e_utils.h"
 #include <Windows.h>
 #include <d3d9.h>
+#include "mwr/mwr.hpp"
 #include "rtx_lights/rtx_light_manager.h"
 #include "math/math.hpp"
 #include "entity_manager/entity_manager.hpp"
@@ -160,6 +161,7 @@ GMOD_MODULE_OPEN() {
 
             RTXMath::Initialize(LUA);
             EntityManager::Initialize(LUA);
+            MeshRenderer::Initialize(LUA);
 
         LUA->Pop();
 

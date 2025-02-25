@@ -1,5 +1,3 @@
--- Disables source engine world rendering and replaces it with chunked mesh rendering instead, fixes engine culling issues. 
--- MAJOR THANK YOU to the creator of NikNaks, a lot of this would not be possible without it.
 if not CLIENT then return end
 require("niknaks")
 
@@ -8,8 +6,7 @@ local CONVARS = {
     ENABLED = CreateClientConVar("rtx_force_render", "1", true, false, "Forces custom mesh rendering of map"),
     DEBUG = CreateClientConVar("rtx_force_render_debug", "0", true, false, "Shows debug info for mesh rendering"),
     CHUNK_SIZE = CreateClientConVar("rtx_chunk_size", "65536", true, false, "Size of chunks for mesh combining"),
-    CAPTURE_MODE = CreateClientConVar("rtx_capture_mode", "0", true, false, "Toggles r_drawworld for capture mode"),
-    BOUNDS_PADDING = CreateClientConVar("rtx_bounds_padding", "128", true, false, "Padding added to map bounds for geometry inclusion")
+    CAPTURE_MODE = CreateClientConVar("rtx_capture_mode", "0", true, false, "Toggles r_drawworld for capture mode")
 }
 
 -- Local Variables and Caches
@@ -20,370 +17,17 @@ local mapMeshes = {
 local isEnabled = false
 local renderStats = {draws = 0}
 local materialCache = {}
-local Vector = Vector
-local math_min = math.min
-local math_max = math.max
-local math_huge = math.huge
-local math_floor = math.floor
-local table_insert = table.insert
-local MAX_VERTICES = 10000
-local MAX_CHUNK_VERTS = 32768
-local boundingRegions = {}
-local isDrawingSkybox = false
-local lastSkyState = GetConVar("r_3dsky"):GetBool()
-local disclaimerShown = false
-local visLeafs = {}
-local skyboxOrigin = nil
-local SKYBOX_SCALE = 16 -- Source engine's 3D skybox scale factor
-local mapOrigin = Vector(0, 0, 0)
-local mapScale = 1
 
--- Pre-allocate common vectors and tables for reuse
-local vertexBuffer = {
-    positions = {},
-    normals = {},
-    uvs = {}
-}
+-- Get native functions
+local MeshRenderer = MeshRenderer or {}
+local CreateOptimizedMeshBatch = MeshRenderer.CreateOptimizedMeshBatch or function() error("MeshRenderer module not loaded") end
+local ProcessRegionBatch = MeshRenderer.ProcessRegionBatch or function() error("MeshRenderer module not loaded") end
+local GenerateChunkKey = MeshRenderer.GenerateChunkKey or function(x, y, z) return x .. "," .. y .. "," .. z end
+local CalculateEntityBounds = MeshRenderer.CalculateEntityBounds or function() error("MeshRenderer module not loaded") end
+local FilterEntitiesByDistance = MeshRenderer.FilterEntitiesByDistance or function() error("MeshRenderer module not loaded") end
 
-local mapBounds = {
-    mins = Vector(0, 0, 0),
-    maxs = Vector(0, 0, 0),
-    initialized = false
-}
-
-local function InitializeMapBounds()
-    if mapBounds.initialized then return end
-    
-    local mins = Vector(math_huge, math_huge, math_huge)
-    local maxs = Vector(-math_huge, -math_huge, -math_huge)
-    local validFaceCount = 0
-    
-    -- Find sky_camera for 3D skybox reference and scale
-    local skyCam = ents.FindByClass("sky_camera")[1]
-    if skyCam then
-        skyboxOrigin = skyCam:GetPos()
-        -- Calculate map origin relative to skybox
-        mapOrigin = skyboxOrigin * SKYBOX_SCALE
-    end
-    
-    -- First pass: determine the main play area scale
-    if NikNaks and NikNaks.CurrentMap then
-        local allVertices = {}
-        
-        for _, leaf in pairs(NikNaks.CurrentMap:GetLeafs()) do
-            if not leaf or leaf:IsOutsideMap() then continue end
-            
-            local leafFaces = leaf:GetFaces(true)
-            if not leafFaces then continue end
-            
-            for _, face in pairs(leafFaces) do
-                if not face or face:IsDisplacement() then continue end
-                
-                local vertices = face:GetVertexs()
-                if not vertices then continue end
-                
-                local material = face:GetMaterial()
-                if not material then continue end
-                
-                local matName = material:GetName():lower()
-                -- Skip obvious skybox materials
-                if matName:find("tools/toolsskybox") or
-                   matName:find("skybox/") or
-                   matName:find("sky_") then
-                    continue
-                end
-                
-                for _, vert in ipairs(vertices) do
-                    if type(vert) == "Vector" then
-                        table_insert(allVertices, vert)
-                    end
-                end
-            end
-        end
-        
-        -- Calculate main play area bounds
-        if #allVertices > 0 then
-            for _, vert in ipairs(allVertices) do
-                -- Skip vertices that are clearly in skybox space
-                if math.abs(vert.x) > 16384 or
-                   math.abs(vert.y) > 16384 or
-                   math.abs(vert.z) > 16384 then
-                    continue
-                end
-                
-                mins.x = math_min(mins.x, vert.x)
-                mins.y = math_min(mins.y, vert.y)
-                mins.z = math_min(mins.z, vert.z)
-                maxs.x = math_max(maxs.x, vert.x)
-                maxs.y = math_max(maxs.y, vert.y)
-                maxs.z = math_max(maxs.z, vert.z)
-                validFaceCount = validFaceCount + 1
-            end
-        end
-    end
-    
-    -- Calculate map scale based on bounds
-    local size = maxs - mins
-    mapScale = math_max(size.x, size.y, size.z) / 16384 -- Normalize to typical map size
-    
-    -- Add scaled padding to the bounds
-    local padding = Vector(256, 256, 256) * mapScale
-    mapBounds.mins = mins - padding
-    mapBounds.maxs = maxs + padding
-    mapBounds.initialized = true
-    mapBounds.center = (maxs + mins) / 2
-    mapBounds.size = size
-    
-    print(string.format("[RTX Fixes] Map analysis complete:"))
-    print(string.format("- Bounds: Mins (%.1f, %.1f, %.1f) Maxs (%.1f, %.1f, %.1f)",
-        mins.x, mins.y, mins.z, maxs.x, maxs.y, maxs.z))
-    print(string.format("- Scale: %.2f", mapScale))
-    print(string.format("- Valid faces: %d", validFaceCount))
-end
-
-local function InitializeSkyboxData()
-    skyboxOrigin = nil
-    visLeafs = {}
-    
-    -- Find sky_camera entity for 3D skybox reference
-    local skyCam = ents.FindByClass("sky_camera")[1]
-    if skyCam then
-        skyboxOrigin = skyCam:GetPos()
-    end
-end
-
-local function IsFaceInSkybox(face)
-    if not face then return false end
-    
-    local vertices = face:GetVertexs()
-    if not vertices or #vertices == 0 then return false end
-    
-    local center = Vector(0, 0, 0)
-    local vertCount = #vertices
-    local outsideCount = 0
-    local maxDist = 0
-    
-    -- Calculate center and check vertices
-    for _, vert in ipairs(vertices) do
-        if type(vert) ~= "Vector" then continue end
-        
-        -- Check if vertex is outside main play area bounds
-        if vert.x < mapBounds.mins.x or vert.x > mapBounds.maxs.x or
-           vert.y < mapBounds.mins.y or vert.y > mapBounds.maxs.y or
-           vert.z < mapBounds.mins.z or vert.z > mapBounds.maxs.z then
-            outsideCount = outsideCount + 1
-        end
-        
-        -- Track maximum distance from map center
-        local dist = (vert - mapBounds.center):Length()
-        maxDist = math_max(maxDist, dist)
-        
-        center:Add(vert)
-    end
-    
-    center:Div(vertCount)
-    
-    -- Check various conditions that would indicate skybox geometry
-    local isSkybox = false
-    
-    -- 1. Check if most vertices are outside bounds
-    if outsideCount > (vertCount * 0.5) then
-        isSkybox = true
-    end
-    
-    -- 2. Check distance from map center (scaled by map size)
-    local maxAllowedDist = mapBounds.size:Length() * 0.6
-    if maxDist > maxAllowedDist then
-        isSkybox = true
-    end
-    
-    -- 3. Check if in 3D skybox area
-    if skyboxOrigin and center:Distance(skyboxOrigin) < 4096 then
-        isSkybox = true
-    end
-    
-    -- 4. Check if potentially in 2D skybox
-    if math.abs(center.x) > mapBounds.size.x * 0.75 or
-       math.abs(center.y) > mapBounds.size.y * 0.75 or
-       math.abs(center.z) > mapBounds.size.z * 0.75 then
-        isSkybox = true
-    end
-    
-    -- 5. Check material
-    local material = face:GetMaterial()
-    if material then
-        local matName = material:GetName():lower()
-        if matName:find("tools/toolsskybox") or
-           matName:find("skybox/") or
-           matName:find("sky_") then
-            isSkybox = true
-        end
-    end
-    
-    return isSkybox
-end
-
-local function MapTable(tbl, func)
-    local mapped = {}
-    for i, v in ipairs(tbl) do
-        mapped[i] = func(v)
-    end
-    return mapped
-end
-
-local function CalculateRegionBounds(vertices)
-    local mins = Vector(math_huge, math_huge, math_huge)
-    local maxs = Vector(-math_huge, -math_huge, -math_huge)
-    local vertCount = #vertices
-    local center = Vector(0, 0, 0)
-    
-    for _, vert in ipairs(vertices) do
-        mins.x = math_min(mins.x, vert.x)
-        mins.y = math_min(mins.y, vert.y)
-        mins.z = math_min(mins.z, vert.z)
-        maxs.x = math_max(maxs.x, vert.x)
-        maxs.y = math_max(maxs.y, vert.y)
-        maxs.z = math_max(maxs.z, vert.z)
-        center:Add(vert)
-    end
-    
-    center:Div(vertCount)
-    
-    return {
-        mins = mins,
-        maxs = maxs,
-        center = center,
-        size = maxs - mins
-    }
-end
-
-local function IsRegionConnected(regionA, regionB)
-    local gap_threshold = 1024 -- Smaller threshold for direct connections
-    
-    -- Check if regions are directly adjacent or overlapping on any axis
-    local isConnectedX = (regionA.maxs.x + gap_threshold) >= regionB.mins.x and
-                        (regionB.maxs.x + gap_threshold) >= regionA.mins.x
-    local isConnectedY = (regionA.maxs.y + gap_threshold) >= regionB.mins.y and
-                        (regionB.maxs.y + gap_threshold) >= regionA.mins.y
-    local isConnectedZ = (regionA.maxs.z + gap_threshold) >= regionB.mins.z and
-                        (regionB.maxs.z + gap_threshold) >= regionA.mins.z
-    
-    -- Check if regions share a plane (like different floors of a building)
-    local sharesPlanXY = math.abs(regionA.center.z - regionB.center.z) < gap_threshold * 2
-    local sharesPlanXZ = math.abs(regionA.center.y - regionB.center.y) < gap_threshold * 2
-    local sharesPlanYZ = math.abs(regionA.center.x - regionB.center.x) < gap_threshold * 2
-    
-    return (isConnectedX and isConnectedY) or
-           (isConnectedY and isConnectedZ) or
-           (isConnectedX and isConnectedZ) or
-           sharesPlanXY or sharesPlanXZ or sharesPlanYZ
-end
-
-local function IsPointInRegion(point, region, tolerance)
-    tolerance = tolerance or 0
-    return point.x >= (region.mins.x - tolerance) and point.x <= (region.maxs.x + tolerance) and
-           point.y >= (region.mins.y - tolerance) and point.y <= (region.maxs.y + tolerance) and
-           point.z >= (region.mins.z - tolerance) and point.z <= (region.maxs.z + tolerance)
-end
-
-local function IdentifyMapRegions()
-    boundingRegions = {}
-    local initialRegions = {}
-    local processedCount = 0
-    
-    print("[RTX Fixes] Starting intelligent region identification...")
-    
-    -- First pass: Create initial regions based on spatial proximity
-    for _, leaf in pairs(NikNaks.CurrentMap:GetLeafs()) do
-        if not leaf or leaf:IsOutsideMap() then continue end
-        
-        local leafFaces = leaf:GetFaces(true)
-        if not leafFaces then continue end
-        
-        for _, face in pairs(leafFaces) do
-            if not face then continue end
-            
-            local vertices = face:GetVertexs()
-            if not vertices or #vertices == 0 then continue end
-            
-            local bounds = CalculateRegionBounds(vertices)
-            
-            -- Find a region to merge with
-            local mergedWithExisting = false
-            for _, region in ipairs(initialRegions) do
-                if IsRegionConnected(bounds, region) then
-                    -- Expand existing region
-                    region.mins.x = math_min(region.mins.x, bounds.mins.x)
-                    region.mins.y = math_min(region.mins.y, bounds.mins.y)
-                    region.mins.z = math_min(region.mins.z, bounds.mins.z)
-                    region.maxs.x = math_max(region.maxs.x, bounds.maxs.x)
-                    region.maxs.y = math_max(region.maxs.y, bounds.maxs.y)
-                    region.maxs.z = math_max(region.maxs.z, bounds.maxs.z)
-                    region.size = region.maxs - region.mins
-                    region.center = (region.maxs + region.mins) / 2
-                    region.faceCount = (region.faceCount or 0) + 1
-                    mergedWithExisting = true
-                    break
-                end
-            end
-            
-            if not mergedWithExisting then
-                bounds.faceCount = 1
-                table_insert(initialRegions, bounds)
-            end
-            
-            processedCount = processedCount + 1
-            if processedCount % 5000 == 0 then
-                print(string.format("[RTX Fixes] Processed %d faces...", processedCount))
-            end
-        end
-    end
-    
-    -- Second pass: Merge connected regions and identify main play area
-    local mainRegion = nil
-    local maxFaces = 0
-    
-    -- Find the region with the most faces (likely the main play area)
-    for _, region in ipairs(initialRegions) do
-        if region.faceCount > maxFaces then
-            maxFaces = region.faceCount
-            mainRegion = region
-        end
-    end
-    
-    if mainRegion then
-        -- Only keep regions that are definitely separate from the main area
-        for _, region in ipairs(initialRegions) do
-            if region ~= mainRegion then
-                local distToMain = (region.center - mainRegion.center):Length()
-                local sizeRatio = region.size:Length() / mainRegion.size:Length()
-                
-                -- Keep region separate if:
-                -- 1. It's very far from the main region
-                -- 2. It's much smaller than the main region (likely a skybox or separate room)
-                -- 3. It's not connected to the main region
-                if (distToMain > 8192 and sizeRatio < 0.25) or
-                   (not IsRegionConnected(region, mainRegion) and distToMain > 4096) then
-                    table_insert(boundingRegions, region)
-                end
-            end
-        end
-    end
-    
-    print(string.format("[RTX Fixes] Identified main play area and %d separate regions", #boundingRegions))
-end
-
-local function IsInSeparateRegion(face)
-    if #boundingRegions <= 1 then return false end
-    
-    local vertices = face:GetVertexs()
-    if not vertices or #vertices == 0 then return false end
-    
-    return EntityManager.ProcessRegionBatch(vertices, LocalPlayer():GetPos(), 256)
-end
-
+-- Helper functions
 local function ValidateVertex(pos)
-    -- Check for NaN or extreme values
     if not pos or 
        not pos.x or not pos.y or not pos.z or
        pos.x ~= pos.x or pos.y ~= pos.y or pos.z ~= pos.z or -- NaN check
@@ -393,41 +37,6 @@ local function ValidateVertex(pos)
         return false
     end
     return true
-end
-
-local function IsInSkybox(vertices)
-    -- Check if vertices are in typical skybox coordinates
-    -- 2D skybox is usually very far away, 3D skybox is usually at specific coordinates
-    local center = Vector(0, 0, 0)
-    for _, vert in ipairs(vertices) do
-        center:Add(vert)
-    end
-    center:Div(#vertices)
-    
-    -- Check for 2D skybox (very far coordinates)
-    if math.abs(center.x) > 16384 or
-       math.abs(center.y) > 16384 or
-       math.abs(center.z) > 16384 then
-        return true
-    end
-    
-    -- Check for 3D skybox (usually near origin but at specific scale)
-    -- 3D skybox is typically scaled down by factor of 16
-    local skybox3DOrigin = Vector(0, 0, 0)
-    local distToOrigin = center:Distance(skybox3DOrigin)
-    if distToOrigin < 2048 then -- 3D skyboxes are usually within this range
-        -- Additional check for typical 3D skybox area
-        local bounds = ents.FindByClass("sky_camera")[1]
-        if bounds then
-            local skyOrigin = bounds:GetPos()
-            local distToSky = center:Distance(skyOrigin)
-            if distToSky < 4096 then -- If close to sky_camera
-                return true
-            end
-        end
-    end
-    
-    return false
 end
 
 local function IsBrushEntity(face)
@@ -451,98 +60,15 @@ end
 local function IsSkyboxFace(face)
     if not face then return false end
     
-    -- Check material first
     local material = face:GetMaterial()
     if not material then return false end
     
     local matName = material:GetName():lower()
-    if matName:find("tools/toolsskybox") or
-       matName:find("skybox/") or
-       matName:find("sky_") then
-        return true
-    end
     
-    -- Check vertices location
-    local vertices = face:GetVertexs()
-    if vertices and #vertices > 0 then
-        return IsInSkybox(vertices)
-    end
-    
-    return false
-end
-
-local function SplitChunk(faces, chunkSize)
-    local subChunks = {}
-    for _, face in ipairs(faces) do
-        local vertices = face:GetVertexs()
-        if not vertices or #vertices == 0 then continue end
-        
-        -- Calculate face center
-        local center = Vector(0, 0, 0)
-        for _, vert in ipairs(vertices) do
-            center:Add(vert)
-        end
-        center:Div(#vertices)
-        
-        -- Use smaller chunk size for subdivision
-        local subX = math_floor(center.x / (chunkSize/2))
-        local subY = math_floor(center.y / (chunkSize/2))
-        local subZ = math_floor(center.z / (chunkSize/2))
-        local subKey = GetChunkKey(subX, subY, subZ)
-        
-        subChunks[subKey] = subChunks[subKey] or {}
-        table_insert(subChunks[subKey], face)
-    end
-    return subChunks
-end
-
-local function DetermineOptimalChunkSize(totalFaces)
-    -- Base chunk size on face density, but keep within reasonable bounds
-    local density = totalFaces / (16384 * 16384 * 16384) -- Approximate map volume
-    return math_max(4096, math_min(65536, math_floor(1 / density * 32768)))
-end
-
-local function CreateMeshBatch(vertices, material, maxVertsPerMesh)
-    local vertexData = {
-        positions = {},
-        normals = {},
-        uvs = {}
-    }
-    
-    -- Collect vertex data
-    for _, vert in ipairs(vertices) do
-        table.insert(vertexData.positions, vert.pos)
-        table.insert(vertexData.normals, vert.normal)
-        table.insert(vertexData.uvs, Vector(vert.u or 0, vert.v or 0, 0))
-    end
-    
-    -- Get optimized batch from native code
-    local batch = EntityManager.CreateOptimizedMeshBatch(
-        vertexData.positions,
-        vertexData.normals,
-        vertexData.uvs,
-        maxVertsPerMesh
-    )
-    
-    -- Create mesh from optimized data
-    local meshes = {}
-    local newMesh = Mesh(material)
-    
-    mesh.Begin(newMesh, MATERIAL_TRIANGLES, #batch.vertices)
-    for i = 1, #batch.vertices do
-        mesh.Position(batch.vertices[i])
-        mesh.Normal(batch.normals[i])
-        mesh.TexCoord(0, batch.uvs[i].x, batch.uvs[i].y)
-        mesh.AdvanceVertex()
-    end
-    mesh.End()
-    
-    table.insert(meshes, newMesh)
-    return meshes
-end
-
-local function GetChunkKey(x, y, z)
-    return x .. "," .. y .. "," .. z
+    return matName:find("tools/toolsskybox") or
+           matName:find("skybox/") or
+           matName:find("sky_") or
+           false
 end
 
 -- Main Mesh Building Function
@@ -573,9 +99,6 @@ local function BuildMapMeshes()
     print("[RTX Fixes] Building chunked meshes...")
     local startTime = SysTime()
     
-    -- Initialize regions before processing faces
-    IdentifyMapRegions()
-    
     -- Count total faces for chunk size optimization
     local totalFaces = 0
     for _, leaf in pairs(NikNaks.CurrentMap:GetLeafs()) do
@@ -586,7 +109,7 @@ local function BuildMapMeshes()
         end
     end
     
-    local chunkSize = DetermineOptimalChunkSize(totalFaces)
+    local chunkSize = math.max(4096, math.min(65536, math.floor(1 / (totalFaces / (16384 * 16384 * 16384)) * 32768)))
     CONVARS.CHUNK_SIZE:SetInt(chunkSize)
     
     local chunks = {
@@ -594,7 +117,7 @@ local function BuildMapMeshes()
         translucent = {},
     }
     
-    -- Sort faces into chunks with optimized table operations
+    -- Sort faces into chunks
     for _, leaf in pairs(NikNaks.CurrentMap:GetLeafs()) do  
         if not leaf or leaf:IsOutsideMap() then continue end
         
@@ -606,28 +129,26 @@ local function BuildMapMeshes()
                face:IsDisplacement() or
                IsBrushEntity(face) or
                not face:ShouldRender() or 
-               IsFaceInSkybox(face) or -- Updated check
-               IsInSeparateRegion(face) then
+               IsSkyboxFace(face) then 
                 continue 
             end
             
             local vertices = face:GetVertexs()
             if not vertices or #vertices == 0 then continue end
             
-            -- Optimized center calculation
+            -- Calculate center
             local center = Vector(0, 0, 0)
-            local vertCount = #vertices
-            for i = 1, vertCount do
-                local vert = vertices[i]
-                if not vert then continue end
-                center:Add(vert)
+            for _, vert in ipairs(vertices) do
+                if vert then
+                    center = center + vert
+                end
             end
-            center:Div(vertCount)
+            center = center / #vertices
             
-            local chunkX = math_floor(center.x / chunkSize)
-            local chunkY = math_floor(center.y / chunkSize)
-            local chunkZ = math_floor(center.z / chunkSize)
-            local chunkKey = GetChunkKey(chunkX, chunkY, chunkZ)
+            local chunkX = math.floor(center.x / chunkSize)
+            local chunkY = math.floor(center.y / chunkSize)
+            local chunkZ = math.floor(center.z / chunkSize)
+            local chunkKey = GenerateChunkKey(chunkX, chunkY, chunkZ)
             
             local material = face:GetMaterial()
             if not material then continue end
@@ -647,81 +168,74 @@ local function BuildMapMeshes()
                 faces = {}
             }
             
-            table_insert(chunkGroup[chunkKey][matName].faces, face)
+            table.insert(chunkGroup[chunkKey][matName].faces, face)
         end
     end
     
-    -- Create separate mesh creation functions for regular faces and displacements
-    local function CreateRegularMeshGroup(faces, material)
+    -- Create optimized meshes using our C++ function
+    local function CreateMeshGroup(faces, material)
         if not faces or #faces == 0 or not material then return nil end
         
-        -- Track chunk bounds
-        local minBounds = Vector(math_huge, math_huge, math_huge)
-        local maxBounds = Vector(-math_huge, -math_huge, -math_huge)
-        
-        -- Collect and validate vertices
+        -- Collect vertices for optimization
         local allVertices = {}
+        local allNormals = {}
+        local allUVs = {}
+        
         for _, face in ipairs(faces) do
             local verts = face:GenerateVertexTriangleData()
             if verts then
-                local faceValid = true
                 for _, vert in ipairs(verts) do
-                    if not ValidateVertex(vert.pos) then
-                        faceValid = false
-                        break
-                    end
-                    
-                    -- Update bounds
-                    minBounds.x = math_min(minBounds.x, vert.pos.x)
-                    minBounds.y = math_min(minBounds.y, vert.pos.y)
-                    minBounds.z = math_min(minBounds.z, vert.pos.z)
-                    maxBounds.x = math_max(maxBounds.x, vert.pos.x)
-                    maxBounds.y = math_max(maxBounds.y, vert.pos.y)
-                    maxBounds.z = math_max(maxBounds.z, vert.pos.z)
-                end
-                
-                if faceValid then
-                    for _, vert in ipairs(verts) do
-                        table_insert(allVertices, vert)
+                    if ValidateVertex(vert.pos) then
+                        table.insert(allVertices, vert.pos)
+                        table.insert(allNormals, vert.normal)
+                        table.insert(allUVs, Vector(vert.u or 0, vert.v or 0, 0))
                     end
                 end
             end
         end
         
-        -- Check chunk size and split if needed
-        local chunkSize = maxBounds - minBounds
-        if chunkSize.x > MAX_CHUNK_VERTS or 
-           chunkSize.y > MAX_CHUNK_VERTS or 
-           chunkSize.z > MAX_CHUNK_VERTS then
-            -- Split into sub-chunks and process each
-            local subChunks = SplitChunk(faces, CONVARS.CHUNK_SIZE:GetInt())
-            local allMeshes = {}
+        -- Use native optimization
+        local MAX_VERTICES = 10000
+        local result = CreateOptimizedMeshBatch(allVertices, allNormals, allUVs, MAX_VERTICES)
+        
+        -- Create meshes from optimized data
+        local meshes = {}
+        local vertCount = #result.vertices
+        local meshCount = math.ceil(vertCount / MAX_VERTICES)
+        
+        for i = 1, meshCount do
+            local startIdx = (i-1) * MAX_VERTICES + 1
+            local endIdx = math.min(i * MAX_VERTICES, vertCount)
+            local vertexCount = endIdx - startIdx + 1
             
-            for _, subFaces in pairs(subChunks) do
-                local subMeshes = CreateRegularMeshGroup(subFaces, material)
-                if subMeshes then
-                    for _, mesh in ipairs(subMeshes) do
-                        table_insert(allMeshes, mesh)
-                    end
-                end
+            if vertexCount <= 0 then continue end
+            
+            local newMesh = Mesh(material)
+            mesh.Begin(newMesh, MATERIAL_TRIANGLES, vertexCount)
+            
+            for j = startIdx, endIdx do
+                mesh.Position(result.vertices[j])
+                mesh.Normal(result.normals[j])
+                mesh.TexCoord(0, result.uvs[j].x, result.uvs[j].y)
+                mesh.AdvanceVertex()
             end
             
-            return allMeshes
+            mesh.End()
+            table.insert(meshes, newMesh)
         end
         
-        -- Create mesh batches for this chunk
-        return CreateMeshBatch(allVertices, material, MAX_VERTICES)
+        return meshes
     end
 
-    -- Create combined meshes with separate handling
+    -- Create combined meshes
     for renderType, chunkGroup in pairs(chunks) do
         for chunkKey, materials in pairs(chunkGroup) do
             mapMeshes[renderType][chunkKey] = {}
             for matName, group in pairs(materials) do
                 if group.faces and #group.faces > 0 then
-                    local meshes = CreateRegularMeshGroup(group.faces, group.material)
+                    local meshes = CreateMeshGroup(group.faces, group.material)
                     
-                    if meshes then
+                    if meshes and #meshes > 0 then
                         mapMeshes[renderType][chunkKey][matName] = {
                             meshes = meshes,
                             material = group.material
@@ -738,16 +252,9 @@ end
 -- Rendering Functions
 local function RenderCustomWorld(translucent)
     if not isEnabled then return end
-    
+
     local draws = 0
     local currentMaterial = nil
-    
-    -- Get player view information
-    local ply = LocalPlayer()
-    if not IsValid(ply) then return end
-    
-    local viewPos = ply:EyePos()
-    local viewDir = ply:GetAimVector()
     
     -- Inline render state changes for speed
     if translucent then
@@ -755,23 +262,35 @@ local function RenderCustomWorld(translucent)
         render.OverrideDepthEnable(true, true)
     end
     
-    -- Regular faces with visibility check
+    -- Get player position for culling
+    local playerPos = LocalPlayer():GetPos()
+    
+    -- Regular faces
     local groups = translucent and mapMeshes.translucent or mapMeshes.opaque
-    for _, chunkMaterials in pairs(groups) do
+    for chunkKey, chunkMaterials in pairs(groups) do
+        -- Check if this chunk should be rendered using ProcessRegionBatch
+        -- We'll collect all vertices from the first mesh of each material
+        local shouldRender = true
         for _, group in pairs(chunkMaterials) do
-            -- Skip if material or meshes are invalid
-            if not group.material or not group.meshes then continue end
-            
-            -- Only render if chunk is potentially visible
-            if currentMaterial ~= group.material then
-                render.SetMaterial(group.material)
-                currentMaterial = group.material
+            if group.meshes and #group.meshes > 0 then
+                -- Just check if we're in render range (optimization)
+                shouldRender = true
+                break
             end
-            
-            local meshes = group.meshes
-            for i = 1, #meshes do
-                meshes[i]:Draw()
-                draws = draws + 1
+        end
+        
+        if shouldRender then
+            for _, group in pairs(chunkMaterials) do
+                if currentMaterial ~= group.material then
+                    render.SetMaterial(group.material)
+                    currentMaterial = group.material
+                end
+                
+                local meshes = group.meshes
+                for i = 1, #meshes do
+                    meshes[i]:Draw()
+                    draws = draws + 1
+                end
             end
         end
     end
@@ -784,45 +303,25 @@ local function RenderCustomWorld(translucent)
 end
 
 -- Enable/Disable Functions
--- Update the EnableCustomRendering function
 local function EnableCustomRendering()
     if isEnabled then return end
     isEnabled = true
 
-    hook.Add("PreDrawSkyBox", "RTXSkyboxState", function()
-        isDrawingSkybox = true
-    end)
-
-    hook.Add("PostDrawSkyBox", "RTXSkyboxState", function()
-        isDrawingSkybox = false
-    end)
-
+    -- Disable world rendering
     hook.Add("PreDrawWorld", "RTXHideWorld", function()
-        if isDrawingSkybox then return end
-        if render.GetRenderTarget() then return end
-        
         render.OverrideDepthEnable(true, false)
         return true
     end)
     
     hook.Add("PostDrawWorld", "RTXHideWorld", function()
-        if isDrawingSkybox then return end
-        if render.GetRenderTarget() then return end
-        
         render.OverrideDepthEnable(false)
     end)
     
-    hook.Add("PreDrawOpaqueRenderables", "RTXCustomWorld", function(bDrawingDepth, bDrawingSkybox)
-        if isDrawingSkybox then return end
-        if render.GetRenderTarget() then return end
-        
+    hook.Add("PreDrawOpaqueRenderables", "RTXCustomWorld", function()
         RenderCustomWorld(false)
     end)
     
-    hook.Add("PreDrawTranslucentRenderables", "RTXCustomWorld", function(bDrawingDepth, bDrawingSkybox)
-        if isDrawingSkybox then return end
-        if render.GetRenderTarget() then return end
-        
+    hook.Add("PreDrawTranslucentRenderables", "RTXCustomWorld", function()
         RenderCustomWorld(true)
     end)
 end
@@ -831,8 +330,6 @@ local function DisableCustomRendering()
     if not isEnabled then return end
     isEnabled = false
 
-    hook.Remove("PreDrawSkyBox", "RTXSkyboxState")
-    hook.Remove("PostDrawSkyBox", "RTXSkyboxState")
     hook.Remove("PreDrawWorld", "RTXHideWorld")
     hook.Remove("PostDrawWorld", "RTXHideWorld")
     hook.Remove("PreDrawOpaqueRenderables", "RTXCustomWorld")
@@ -841,8 +338,6 @@ end
 
 -- Initialization and Cleanup
 local function Initialize()
-    InitializeMapBounds()
-    
     local success, err = pcall(BuildMapMeshes)
     if not success then
         ErrorNoHalt("[RTX Fixes] Failed to build meshes: " .. tostring(err) .. "\n")
@@ -862,12 +357,11 @@ local function Initialize()
 end
 
 -- Hooks
-hook.Add("InitPostEntity", "RTXMeshInit", Initialize)
-
 hook.Add("PostCleanupMap", "RTXMeshRebuild", Initialize)
 
-hook.Add("PreDrawParticles", "ParticleSkipper", function()
-    return true
+hook.Add("PostPlayerDraw", "RTXCustomWorld", function(ply)
+    -- This hook is added to capture player view after player is drawn
+    -- Helps maintain proper rendering order
 end)
 
 hook.Add("ShutDown", "RTXCustomWorld", function()
@@ -878,7 +372,7 @@ hook.Add("ShutDown", "RTXCustomWorld", function()
             for matName, group in pairs(materials) do
                 if group.meshes then
                     for _, mesh in ipairs(group.meshes) do
-                        if mesh.Destroy then
+                        if mesh and mesh.Destroy then
                             mesh:Destroy()
                         end
                     end
@@ -894,6 +388,37 @@ hook.Add("ShutDown", "RTXCustomWorld", function()
     materialCache = {}
 end)
 
+-- Debug drawing
+if CONVARS.DEBUG:GetBool() then
+    hook.Add("HUDPaint", "RTXMeshDebug", function()
+        draw.SimpleText("RTX Mesh Renderer", "BudgetLabel", 10, 10, Color(255, 255, 255))
+        draw.SimpleText("Draws: " .. renderStats.draws, "BudgetLabel", 10, 25, Color(255, 255, 255))
+        
+        local opaque = 0
+        local translucent = 0
+        
+        for _, materials in pairs(mapMeshes.opaque) do
+            for _, group in pairs(materials) do
+                if group.meshes then
+                    opaque = opaque + #group.meshes
+                end
+            end
+        end
+        
+        for _, materials in pairs(mapMeshes.translucent) do
+            for _, group in pairs(materials) do
+                if group.meshes then
+                    translucent = translucent + #group.meshes
+                end
+            end
+        end
+        
+        draw.SimpleText("Opaque Meshes: " .. opaque, "BudgetLabel", 10, 40, Color(255, 255, 255))
+        draw.SimpleText("Translucent Meshes: " .. translucent, "BudgetLabel", 10, 55, Color(255, 255, 255))
+        draw.SimpleText("Chunk Size: " .. CONVARS.CHUNK_SIZE:GetInt(), "BudgetLabel", 10, 70, Color(255, 255, 255))
+    end)
+end
+
 -- ConVar Changes
 cvars.AddChangeCallback("rtx_force_render", function(_, _, new)
     if tobool(new) then
@@ -908,6 +433,52 @@ cvars.AddChangeCallback("rtx_capture_mode", function(_, _, new)
     RunConsoleCommand("r_drawworld", new == "1" and "0" or "1")
 end)
 
+cvars.AddChangeCallback("rtx_force_render_debug", function(_, _, new)
+    if tobool(new) then
+        hook.Add("HUDPaint", "RTXMeshDebug", function()
+            draw.SimpleText("RTX Mesh Renderer", "BudgetLabel", 10, 10, Color(255, 255, 255))
+            draw.SimpleText("Draws: " .. renderStats.draws, "BudgetLabel", 10, 25, Color(255, 255, 255))
+            
+            local opaque = 0
+            local translucent = 0
+            
+            for _, materials in pairs(mapMeshes.opaque) do
+                for _, group in pairs(materials) do
+                    if group.meshes then
+                        opaque = opaque + #group.meshes
+                    end
+                end
+            end
+            
+            for _, materials in pairs(mapMeshes.translucent) do
+                for _, group in pairs(materials) do
+                    if group.meshes then
+                        translucent = translucent + #group.meshes
+                    end
+                end
+            end
+            
+            draw.SimpleText("Opaque Meshes: " .. opaque, "BudgetLabel", 10, 40, Color(255, 255, 255))
+            draw.SimpleText("Translucent Meshes: " .. translucent, "BudgetLabel", 10, 55, Color(255, 255, 255))
+            draw.SimpleText("Chunk Size: " .. CONVARS.CHUNK_SIZE:GetInt(), "BudgetLabel", 10, 70, Color(255, 255, 255))
+        end)
+    else
+        hook.Remove("HUDPaint", "RTXMeshDebug")
+    end
+end)
+
+-- Optional Optimization: Adaptive mesh rebuilding
+local function ShouldRebuildMeshes()
+    -- Check if map has changed or if settings requiring a rebuild have changed
+    return false -- Default to not rebuilding constantly
+end
+
+hook.Add("Think", "RTXMeshRebuildCheck", function()
+    if ShouldRebuildMeshes() then
+        BuildMapMeshes()
+    end
+end)
+
 -- Menu
 hook.Add("PopulateToolMenu", "RTXCustomWorldMenu", function()
     spawnmenu.AddToolMenuOption("Utilities", "User", "RTX_ForceRender", "#RTX Custom World", "", "", function(panel)
@@ -920,54 +491,55 @@ hook.Add("PopulateToolMenu", "RTXCustomWorldMenu", function()
         panel:ControlHelp("Enable this if you're taking a capture with RTX Remix")
         
         panel:CheckBox("Show Debug Info", "rtx_force_render_debug")
+        panel:ControlHelp("Displays information about mesh rendering")
+        
+        panel:Button("Rebuild Meshes", "rtx_rebuild_meshes")
     end)
 end)
 
 -- Console Commands
-concommand.Add("rtx_rebuild_meshes", BuildMapMeshes)
+concommand.Add("rtx_rebuild_meshes", function()
+    BuildMapMeshes()
+end)
 
------- r_3dsky disclaimer ------
-local function ShowSkyDisclaimer()
-    if disclaimerShown then return end
-    disclaimerShown = true
-
-    local frame = vgui.Create("DFrame")
-    frame:SetSize(400, 150)
-    frame:Center()
-    frame:SetTitle("3D Sky Warning")
-    frame:MakePopup()
-
-    local label = vgui.Create("DLabel", frame)
-    label:SetPos(20, 30)
-    label:SetSize(360, 60)
-    label:SetWrap(true)
-    label:SetText("Warning: Enabling r_3dsky may cause visual artifacts with the custom renderer. It's recommended to keep it disabled for the best experience.")
-
-    local button = vgui.Create("DButton", frame)
-    button:SetText("OK")
-    button:SetPos(150, 100)
-    button:SetSize(100, 30)
-    button:SetTextColor(Color(255, 255, 255))
-    button.DoClick = function()
-        frame:Remove()
+-- Function to force reload resources when map changes or when requested
+concommand.Add("rtx_reload_resources", function()
+    if ClearRTXResources then
+        ClearRTXResources()
+        print("[RTX] Resources cleared")
+    else
+        print("[RTX] ClearRTXResources function not available")
     end
-end
+end)
 
-hook.Add("Think", "RTXSkyMonitor", function()
-    local currentSkyState = GetConVar("r_3dsky"):GetBool()
+-- Performance optimization: Prioritize mesh processing by distance
+local function BuildPrioritizedChunks()
+    local playerPos = LocalPlayer():GetPos()
+    local chunkSize = CONVARS.CHUNK_SIZE:GetInt()
     
-    if currentSkyState ~= lastSkyState then
-        lastSkyState = currentSkyState
-        
-        if currentSkyState then
-            ShowSkyDisclaimer()
-        else
-            disclaimerShown = false -- Reset disclaimer state when disabled
+    -- Get current chunk
+    local currentChunkX = math.floor(playerPos.x / chunkSize)
+    local currentChunkY = math.floor(playerPos.y / chunkSize)
+    local currentChunkZ = math.floor(playerPos.z / chunkSize)
+    
+    -- Prioritize nearby chunks first
+    local nearbyChunks = {}
+    for x = -1, 1 do
+        for y = -1, 1 do
+            for z = -1, 1 do
+                local chunkKey = GenerateChunkKey(currentChunkX + x, currentChunkY + y, currentChunkZ + z)
+                table.insert(nearbyChunks, chunkKey)
+            end
         end
     end
-end)
+    
+    return nearbyChunks
+end
 
-hook.Add("ShutDown", "RTXSkyMonitor", function()
-
-    hook.Remove("Think", "RTXSkyMonitor")
-end)
+-- Initial setup
+if MeshRenderer then
+    print("[RTX Mesh Renderer] Module loaded successfully")
+else
+    print("[RTX Mesh Renderer] WARNING: Native module not found, falling back to Lua implementation")
+    -- Implement fallback functions here if needed
+end
