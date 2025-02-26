@@ -338,25 +338,57 @@ end
 
 -- Initialization and Cleanup
 local function Initialize()
-    local success, err = pcall(BuildMapMeshes)
-    if not success then
-        ErrorNoHalt("[RTX Fixes] Failed to build meshes: " .. tostring(err) .. "\n")
-        DisableCustomRendering()
-        return
+    local attempts = 0
+    local function AttemptBuild()
+        attempts = attempts + 1
+        if attempts > 3 then
+            ErrorNoHalt("[RTX Fixes] Failed to build meshes after 3 attempts\n")
+            return
+        end
+        
+        if not NikNaks or not NikNaks.CurrentMap then
+            print("[RTX Fixes] NikNaks not ready yet, retrying in 2 seconds...")
+            timer.Simple(2, AttemptBuild)
+            return
+        end
+        
+        local success, err = pcall(BuildMapMeshes)
+        if not success then
+            ErrorNoHalt("[RTX Fixes] Failed to build meshes: " .. tostring(err) .. "\n")
+            print("[RTX Fixes] Retrying in 2 seconds...")
+            timer.Simple(2, AttemptBuild)
+            return
+        end
+        
+        timer.Simple(1, function()
+            if CONVARS.ENABLED:GetBool() then
+                local success, err = pcall(EnableCustomRendering)
+                if not success then
+                    ErrorNoHalt("[RTX Fixes] Failed to enable custom rendering: " .. tostring(err) .. "\n")
+                    DisableCustomRendering()
+                else
+                    print("[RTX Fixes] Custom rendering enabled successfully")
+                end
+            end
+        end)
     end
     
-    timer.Simple(1, function()
-        if CONVARS.ENABLED:GetBool() then
-            local success, err = pcall(EnableCustomRendering)
-            if not success then
-                ErrorNoHalt("[RTX Fixes] Failed to enable custom rendering: " .. tostring(err) .. "\n")
-                DisableCustomRendering()
-            end
-        end
-    end)
+    AttemptBuild()
 end
 
 -- Hooks
+hook.Add("InitPostEntity", "RTXMeshInitialBuild", function()
+    -- Allow more time for NikNaks to initialize
+    timer.Simple(3, function()
+        if not NikNaks or not NikNaks.CurrentMap then
+            print("[RTX Fixes] NikNaks not ready yet, will retry in 2 seconds...")
+            timer.Simple(2, Initialize)
+            return
+        end
+        Initialize()
+    end)
+end)
+
 hook.Add("PostCleanupMap", "RTXMeshRebuild", Initialize)
 
 hook.Add("PostPlayerDraw", "RTXCustomWorld", function(ply)
