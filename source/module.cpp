@@ -104,6 +104,113 @@ LUA_FUNCTION(ClearRTXResources_Native) {
     }
 }
 
+LUA_FUNCTION(GetRemixUIState) {
+    try {
+        if (!g_remix) {
+            LUA->PushNumber(0); // None (UI not visible)
+            return 1;
+        }
+
+        auto result = g_remix->GetUIState();
+        if (!result) {
+            LUA->PushNumber(0); // None (UI not visible)
+            return 1;
+        }
+
+        // Convert to a Lua number (matching the enum values)
+        int state = static_cast<int>(result.value());
+        LUA->PushNumber(state);
+        return 1;
+    }
+    catch (...) {
+        Error("[RTX] Exception in GetRemixUIState\n");
+        LUA->PushNumber(0);
+        return 1;
+    }
+}
+
+LUA_FUNCTION(SetRemixUIState) {
+    try {
+        if (!g_remix) {
+            LUA->PushBool(false);
+            return 1;
+        }
+
+        if (!LUA->IsType(1, Type::NUMBER)) {
+            LUA->ThrowError("Expected number argument for UI state");
+            return 0;
+        }
+
+        int stateNum = static_cast<int>(LUA->GetNumber(1));
+        remix::UIState state = static_cast<remix::UIState>(stateNum);
+        
+        auto result = g_remix->SetUIState(state);
+        LUA->PushBool(result);
+        return 1;
+    }
+    catch (...) {
+        Error("[RTX] Exception in SetRemixUIState\n");
+        LUA->PushBool(false);
+        return 1;
+    }
+}
+
+LUA_FUNCTION(PrintRemixUIState) {
+    try {
+        Msg("[RTX] Checking Remix UI state...\n");
+        
+        if (!g_remix) {
+            Msg("[RTX] Error: g_remix is NULL (Remix API not initialized)\n");
+            return 0;
+        }
+        
+        Msg("[RTX] g_remix is valid, checking GetUIState function...\n");
+        
+        // Check if the function exists in the interface
+        if (!g_remix->m_CInterface.GetUIState) {
+            Msg("[RTX] Error: GetUIState function is not available in the Remix API\n");
+            Msg("[RTX] This may indicate you're using an older version of Remix that doesn't support this feature\n");
+            return 0;
+        }
+        
+        Msg("[RTX] GetUIState function exists, calling it...\n");
+        
+        // Try to call the function directly
+        remixapi_UIState rawState = g_remix->m_CInterface.GetUIState();
+        Msg("[RTX] Raw UI state value: %d\n", rawState);
+        
+        // Now try to get it through the wrapper
+        auto result = g_remix->GetUIState();
+        if (!result) {
+            Msg("[RTX] Error: GetUIState wrapper returned failure\n");
+            Msg("[RTX] Error code: %d\n", result.status());
+            return 0;
+        }
+
+        int state = static_cast<int>(result.value());
+        const char* stateStr = "Unknown";
+        
+        switch (state) {
+            case 0:
+                stateStr = "None (UI not visible)";
+                break;
+            case 1:
+                stateStr = "Basic UI";
+                break;
+            case 2:
+                stateStr = "Advanced UI";
+                break;
+        }
+        
+        Msg("[RTX] Current UI state: %d (%s)\n", state, stateStr);
+        return 0;
+    }
+    catch (...) {
+        Error("[RTX] Exception in PrintRemixUIState\n");
+        return 0;
+    }
+}
+
 GMOD_MODULE_OPEN() { 
     try {
         Msg("[RTX Remix Fixes 2] - Module loaded!\n"); 
@@ -155,6 +262,15 @@ GMOD_MODULE_OPEN() {
 
         // Register Lua functions
         LUA->PushSpecial(GarrysMod::Lua::SPECIAL_GLOB); 
+
+            LUA->PushCFunction(GetRemixUIState);
+            LUA->SetField(-2, "GetRemixUIState");
+
+            LUA->PushCFunction(SetRemixUIState);
+            LUA->SetField(-2, "SetRemixUIState");
+
+            LUA->PushCFunction(PrintRemixUIState);
+            LUA->SetField(-2, "PrintRemixUIState");
 
             LUA->PushCFunction(ClearRTXResources_Native);
             LUA->SetField(-2, "ClearRTXResources");
