@@ -18,6 +18,11 @@ local isEnabled = false
 local renderStats = {draws = 0}
 local materialCache = {}
 local bDrawingSkybox = false
+local mapBounds = {
+    min = Vector(0, 0, 0),
+    max = Vector(0, 0, 0),
+    initialized = false
+}
 
 -- Get native functions
 local MeshRenderer = MeshRenderer or {}
@@ -28,6 +33,69 @@ local CalculateEntityBounds = MeshRenderer.CalculateEntityBounds or function() e
 local FilterEntitiesByDistance = MeshRenderer.FilterEntitiesByDistance or function() error("MeshRenderer module not loaded") end
 
 -- Helper functions
+-- Add this function to get map bounds from NikNaks
+local function InitializeMapBounds()
+    if mapBounds.initialized then return true end
+    
+    if NikNaks and NikNaks.CurrentMap then
+        local min, max
+        
+        -- Try WorldMin/Max first
+        if NikNaks.CurrentMap.WorldMin and NikNaks.CurrentMap.WorldMax then
+            min = NikNaks.CurrentMap:WorldMin()
+            max = NikNaks.CurrentMap:WorldMax()
+        end
+        
+        -- If that failed, try GetBrushBounds
+        if (not min or not max) and NikNaks.CurrentMap.GetBrushBounds then
+            min, max = NikNaks.CurrentMap:GetBrushBounds()
+        end
+        
+        if min and max then
+            mapBounds.min = min
+            mapBounds.max = max
+            mapBounds.initialized = true
+            
+            -- Add some padding to avoid edge clipping
+            mapBounds.min = mapBounds.min - Vector(128, 128, 128)
+            mapBounds.max = mapBounds.max + Vector(128, 128, 128)
+            
+            print("[RTX Fixes] Map boundaries loaded:")
+            print("  Min: " .. tostring(mapBounds.min))
+            print("  Max: " .. tostring(mapBounds.max))
+            return true
+        end
+    end
+    
+    -- Try next frame
+    timer.Simple(0, InitializeMapBounds)
+    return false
+end
+
+local function IsPositionInMapBounds(pos)
+    if not mapBounds.initialized then return true end
+    
+    return pos.x >= mapBounds.min.x and pos.x <= mapBounds.max.x and
+           pos.y >= mapBounds.min.y and pos.y <= mapBounds.max.y and
+           pos.z >= mapBounds.min.z and pos.z <= mapBounds.max.z
+end
+
+local function IsFaceInMapBounds(face)
+    if not mapBounds.initialized then return true end
+    
+    local vertices = face:GetVertexs()
+    if not vertices or #vertices == 0 then return false end
+    
+    -- Check if any vertex is inside the bounds
+    for _, vert in ipairs(vertices) do
+        if IsPositionInMapBounds(vert) then
+            return true
+        end
+    end
+    
+    return false
+end
+
 local function ValidateVertex(pos)
     if not pos or 
        not pos.x or not pos.y or not pos.z or
@@ -130,7 +198,8 @@ local function BuildMapMeshes()
                face:IsDisplacement() or
                IsBrushEntity(face) or
                not face:ShouldRender() or 
-               IsSkyboxFace(face) then 
+               IsSkyboxFace(face) or
+               not IsFaceInMapBounds(face) then -- Add this new check
                 continue 
             end
             
@@ -253,6 +322,11 @@ end
 -- Rendering Functions
 local function RenderCustomWorld(translucent)
     if not isEnabled then return end
+    
+    -- Initialize map bounds if not already done
+    if not mapBounds.initialized then
+        InitializeMapBounds()
+    end
 
     local draws = 0
     local currentMaterial = nil
@@ -266,22 +340,45 @@ local function RenderCustomWorld(translucent)
     -- Get player position for culling
     local playerPos = LocalPlayer():GetPos()
     
-    -- Regular faces
-    local groups = translucent and mapMeshes.translucent or mapMeshes.opaque
+    -- Regular faces - add safety check for nil
+    local groupType = translucent and "translucent" or "opaque"
+    local groups = mapMeshes[groupType]
+    
+    -- Make sure groups exists before trying to iterate
+    if not groups then
+        print("[RTX Fixes] Warning: No " .. groupType .. " mesh groups found")
+        return
+    end
+    
     for chunkKey, chunkMaterials in pairs(groups) do
-        -- Check if this chunk should be rendered using ProcessRegionBatch
-        -- We'll collect all vertices from the first mesh of each material
-        local shouldRender = true
-        for _, group in pairs(chunkMaterials) do
-            if group.meshes and #group.meshes > 0 then
-                -- Just check if we're in render range (optimization)
+        -- Check if this chunk should be rendered
+        local shouldRender = false
+        
+        -- Split the chunkKey back into coordinates
+        local x, y, z = string.match(chunkKey, "([^,]+),([^,]+),([^,]+)")
+        if x and y and z then
+            x, y, z = tonumber(x), tonumber(y), tonumber(z)
+            local chunkSize = CONVARS.CHUNK_SIZE:GetInt()
+            
+            -- Calculate chunk center position
+            local chunkCenter = Vector(
+                x * chunkSize + chunkSize/2,
+                y * chunkSize + chunkSize/2,
+                z * chunkSize + chunkSize/2
+            )
+            
+            -- Check if chunk is inside map bounds
+            if IsPositionInMapBounds(chunkCenter) then
                 shouldRender = true
-                break
             end
+        else
+            shouldRender = true  -- If we can't parse the key, render anyway
         end
         
         if shouldRender then
             for _, group in pairs(chunkMaterials) do
+                if not group.meshes then continue end
+                
                 if currentMaterial ~= group.material then
                     render.SetMaterial(group.material)
                     currentMaterial = group.material
@@ -354,6 +451,7 @@ end
 
 -- Initialization and Cleanup
 local function Initialize()
+    InitializeMapBounds()
     local attempts = 0
     local function AttemptBuild()
         attempts = attempts + 1
