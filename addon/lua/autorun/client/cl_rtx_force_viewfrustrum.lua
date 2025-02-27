@@ -8,12 +8,6 @@ local cv_environment_light_distance = CreateClientConVar("fr_environment_light_d
 local cv_debug = CreateClientConVar("fr_debug_messages", "0", true, false, "Enable debug messages for RTX view frustum optimization")
 local cv_show_advanced = CreateClientConVar("fr_show_advanced", "0", true, false, "Show advanced RTX view frustum settings")
 
--- Cache commonly used functions
-local Vector = Vector
-local IsValid = IsValid
-local pairs = pairs
-local ipairs = ipairs
-
 -- Cache the bounds vectors
 local boundsSize = cv_bounds_size:GetFloat()
 local mins = Vector(-boundsSize, -boundsSize, -boundsSize)
@@ -30,6 +24,10 @@ local RTXMath_NegateVector = RTXMath.NegateVector
 local RTXMath_MultiplyVector = RTXMath.MultiplyVector
 
 -- Constants and caches
+local Vector = Vector
+local IsValid = IsValid
+local pairs = pairs
+local ipairs = ipairs
 local DEBOUNCE_TIME = 0.1
 local boundsUpdateTimer = "FR_BoundsUpdate"
 local rtxUpdateTimer = "FR_RTXUpdate"
@@ -37,6 +35,11 @@ local rtxUpdaterCache = {}
 local rtxUpdaterCount = 0
 local staticProps = {}
 local originalBounds = {}
+local mapBounds = {
+    min = Vector(-16384, -16384, -16384),
+    max = Vector(16384, 16384, 16384)
+}
+local boundsInitialized = false
 
 -- RTX Light Updater model list
 local RTX_UPDATER_MODELS = {
@@ -80,6 +83,37 @@ local SPECIAL_ENTITY_BOUNDS = {
     -- Add more entities here as needed:
     -- ["entity_class"] = { size = number, description = "description" }
 }
+
+local function InitializeMapBounds()
+    if not NikNaks or not NikNaks.CurrentMap then
+        print("[RTX Fixes] NikNaks not available, using default bounds")
+        return false
+    end
+    
+    -- Try to get the map bounds
+    local min, max
+    if NikNaks.CurrentMap.WorldMin and NikNaks.CurrentMap.WorldMax then
+        min = NikNaks.CurrentMap:WorldMin()
+        max = NikNaks.CurrentMap:WorldMax()
+    elseif NikNaks.CurrentMap.GetBrushBounds then
+        min, max = NikNaks.CurrentMap:GetBrushBounds()
+    end
+    
+    -- Validate bounds
+    if min and max and min:IsValid() and max:IsValid() then
+        -- Add a small margin to avoid edge cases
+        mapBounds.min = min - Vector(64, 64, 64)
+        mapBounds.max = max + Vector(64, 64, 64)
+        print("[RTX Fixes] Map bounds loaded: Min=" .. tostring(mapBounds.min) .. ", Max=" .. tostring(mapBounds.max))
+        return true
+    end
+    
+    return false
+end
+
+local function IsPointWithinBounds(point)
+    return point:WithinAABox(mapBounds.min, mapBounds.max)
+end
 
 local function UpdateBoundsVectors(size)
     boundsSize = size
