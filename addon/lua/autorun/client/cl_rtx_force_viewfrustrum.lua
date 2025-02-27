@@ -61,13 +61,15 @@ local LIGHT_TYPES = {
     POINT = "light",
     SPOT = "light_spot",
     DYNAMIC = "light_dynamic",
-    ENVIRONMENT = "light_environment"
+    ENVIRONMENT = "light_environment",
+    DIRECTIONAL = "light_directional"
 }
 
 local REGULAR_LIGHT_TYPES = {
     [LIGHT_TYPES.POINT] = true,
     [LIGHT_TYPES.SPOT] = true,
-    [LIGHT_TYPES.DYNAMIC] = true
+    [LIGHT_TYPES.DYNAMIC] = true,
+    [LIGHT_TYPES.DIRECTIONAL] = true
 }
 
 local SPECIAL_ENTITY_BOUNDS = {
