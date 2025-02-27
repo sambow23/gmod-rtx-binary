@@ -84,33 +84,6 @@ local SPECIAL_ENTITY_BOUNDS = {
     -- ["entity_class"] = { size = number, description = "description" }
 }
 
-local function InitializeMapBounds()
-    if not NikNaks or not NikNaks.CurrentMap then
-        print("[RTX Fixes] NikNaks not available, using default bounds")
-        return false
-    end
-    
-    -- Try to get the map bounds
-    local min, max
-    if NikNaks.CurrentMap.WorldMin and NikNaks.CurrentMap.WorldMax then
-        min = NikNaks.CurrentMap:WorldMin()
-        max = NikNaks.CurrentMap:WorldMax()
-    elseif NikNaks.CurrentMap.GetBrushBounds then
-        min, max = NikNaks.CurrentMap:GetBrushBounds()
-    end
-    
-    -- Validate bounds
-    if min and max and min:IsValid() and max:IsValid() then
-        -- Add a small margin to avoid edge cases
-        mapBounds.min = min - Vector(64, 64, 64)
-        mapBounds.max = max + Vector(64, 64, 64)
-        print("[RTX Fixes] Map bounds loaded: Min=" .. tostring(mapBounds.min) .. ", Max=" .. tostring(mapBounds.max))
-        return true
-    end
-    
-    return false
-end
-
 local function IsPointWithinBounds(point)
     return point:WithinAABox(mapBounds.min, mapBounds.max)
 end
