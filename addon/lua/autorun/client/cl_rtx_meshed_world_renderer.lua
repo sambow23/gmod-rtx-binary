@@ -17,6 +17,7 @@ local mapMeshes = {
 local isEnabled = false
 local renderStats = {draws = 0}
 local materialCache = {}
+local bDrawingSkybox = false
 
 -- Get native functions
 local MeshRenderer = MeshRenderer or {}
@@ -302,26 +303,41 @@ local function RenderCustomWorld(translucent)
     renderStats.draws = draws
 end
 
+hook.Add("PreDrawSkyBox", "RTXSkyboxDetection", function()
+    bDrawingSkybox = true
+end)
+
+hook.Add("PostDrawSkyBox", "RTXSkyboxDetection", function()
+    bDrawingSkybox = false
+end)
+
 -- Enable/Disable Functions
 local function EnableCustomRendering()
     if isEnabled then return end
     isEnabled = true
 
-    -- Disable world rendering
     hook.Add("PreDrawWorld", "RTXHideWorld", function()
+        if render.GetRenderTarget() then return end
+        if bDrawingSkybox then return end
         render.OverrideDepthEnable(true, false)
         return true
     end)
     
     hook.Add("PostDrawWorld", "RTXHideWorld", function()
+        if render.GetRenderTarget() then return end
+        if bDrawingSkybox then return end
         render.OverrideDepthEnable(false)
     end)
     
     hook.Add("PreDrawOpaqueRenderables", "RTXCustomWorld", function()
+        if bDrawingSkybox then return end
+        if render.GetRenderTarget() then return end
         RenderCustomWorld(false)
     end)
     
     hook.Add("PreDrawTranslucentRenderables", "RTXCustomWorld", function()
+        if bDrawingSkybox then return end
+        if render.GetRenderTarget() then return end
         RenderCustomWorld(true)
     end)
 end
