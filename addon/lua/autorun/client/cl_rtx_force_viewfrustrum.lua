@@ -40,6 +40,7 @@ local mapBounds = {
     max = Vector(16384, 16384, 16384)
 }
 local boundsInitialized = false
+local patternCache = {}
 
 -- RTX Light Updater model list
 local RTX_UPDATER_MODELS = {
@@ -80,8 +81,35 @@ local SPECIAL_ENTITY_BOUNDS = {
 
     ["func_door_rotating"] = {
         size = 512, -- Default size for doors
-        description = "Door entities", -- For debug/documentation
-    }
+        description = "func_ entities", -- For debug/documentation
+    },
+
+    ["func_physbox"] = {
+        size = 512, -- Default size for doors
+        description = "func_ entities", -- For debug/documentation
+    },
+
+    ["func_breakable"] = {
+        size = 512, -- Default size for doors
+        description = "func_ entities", -- For debug/documentation
+    },
+
+    ["^npc_%w+"] = {
+        size = 512,
+        description = "All npc_ entities",
+        isPattern = true
+    },
+
+    ["^_rope%w+"] = {
+        size = 512,
+        description = "All _rope entities",
+        isPattern = true
+    },
+
+    ["prop_physics"] = {
+        size = 512, -- Default size for doors
+        description = "Prop entities", -- For debug/documentation
+    },
     -- Add more entities here as needed:
     -- ["entity_class"] = { size = number, description = "description" }
 }
@@ -121,6 +149,31 @@ function AddSpecialEntityBounds(class, size, description)
             end
         end
     end
+end
+
+local function GetSpecialBoundsForClass(className)
+    -- First try direct lookup (fastest)
+    local directMatch = SPECIAL_ENTITY_BOUNDS[className]
+    if directMatch then
+        return directMatch
+    end
+    
+    -- Check cache for previous pattern match
+    if patternCache[className] then
+        return patternCache[className]
+    end
+    
+    -- Try pattern matching
+    for pattern, boundsInfo in pairs(SPECIAL_ENTITY_BOUNDS) do
+        if boundsInfo.isPattern and string.match(className, pattern) then
+            -- Cache the result for future lookups
+            patternCache[className] = boundsInfo
+            return boundsInfo
+        end
+    end
+    
+    -- No match found
+    return nil
 end
 
 -- Helper function to identify RTX updaters
@@ -170,28 +223,31 @@ local function RemoveFromRTXCache(ent)
 end
 
 -- Set bounds for a single entity
-local function SetEntityBounds(ent, useOriginal)
+function SetEntityBounds(ent, useOriginal)
     if not IsValid(ent) then return end
     
+    -- Original bounds restoration code...
     if useOriginal then
         if originalBounds[ent] then
             ent:SetRenderBounds(originalBounds[ent].mins, originalBounds[ent].maxs)
         end
         return
     end
-
+    
     StoreOriginalBounds(ent)
     
     local entPos = ent:GetPos()
     if not entPos then return end
-
-    -- Check for special entity classes first
-    local specialBounds = SPECIAL_ENTITY_BOUNDS[ent:GetClass()]
+    
+    -- Use pattern-aware lookup
+    local className = ent:GetClass()
+    local specialBounds = GetSpecialBoundsForClass(className)
+    
     if specialBounds then
         local size = specialBounds.size
         
         -- For doors, use our native implementation
-        if ent:GetClass() == "prop_door_rotating" then
+        if className == "prop_door_rotating" then
             EntityManager.CalculateSpecialEntityBounds(ent, size)
         else
             -- Regular special entities
@@ -201,11 +257,11 @@ local function SetEntityBounds(ent, useOriginal)
         end
         
         -- Debug output if enabled
-        if cv_enabled:GetBool() and cv_debug:GetBool() then
-            print(string.format("[RTX Fixes] Special entity bounds applied (%s): %d", 
-                ent:GetClass(), size))
+        if cv_debug:GetBool() then
+            local patternText = specialBounds.isPattern and " (via pattern)" or ""
+            print(string.format("[RTX Fixes] Special entity bounds applied (%s): %d%s", 
+                className, size, patternText))
         end
-        
         return
         
     -- Then check other entity types
