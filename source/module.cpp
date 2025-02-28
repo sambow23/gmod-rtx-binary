@@ -7,6 +7,7 @@
 #include "e_utils.h"
 #include <Windows.h>
 #include <d3d9.h>
+#include "interfaces/gm_interfaces.h"
 #include "mwr/mwr.hpp"
 #include "rtx_lights/rtx_light_manager.h"
 #include "math/math.hpp"
@@ -214,6 +215,19 @@ LUA_FUNCTION(PrintRemixUIState) {
 GMOD_MODULE_OPEN() { 
     try {
         Msg("[RTX Remix Fixes 2] - Module loaded!\n"); 
+        
+        // if (Interfaces::Initialize()) {                              // Disabled for now until i dump the vtables for materialsystem
+        //     Msg("[RTX] Interfaces initialized successfully\n");
+            
+        //     // Replace SpriteCard materials
+        //     if (Interfaces::ReplaceSpriteCardWithUnlitGeneric()) {
+        //         Msg("[RTX] Successfully replaced SpriteCard materials with UnlitGeneric\n");
+        //     } else {
+        //         Msg("[RTX] No SpriteCard materials found or replacement failed\n");
+        //     }
+        // } else {
+        //     Error("[RTX] Failed to initialize interfaces\n");
+        // }
 
         // Find Source's D3D9 device
         auto sourceDevice = static_cast<IDirect3DDevice9Ex*>(FindD3D9Device());
