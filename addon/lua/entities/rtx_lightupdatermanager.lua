@@ -18,14 +18,16 @@ local LIGHT_TYPES = {
     POINT = "light",
     SPOT = "light_spot",
     DYNAMIC = "light_dynamic",
-    ENVIRONMENT = "light_environment"
+    ENVIRONMENT = "light_environment",
+    DIRECTIONAL = "light_directional"
 }
 
 -- Separate regular lights from environment lights
 local REGULAR_LIGHT_TYPES = {
     [LIGHT_TYPES.POINT] = true,
     [LIGHT_TYPES.SPOT] = true,
-    [LIGHT_TYPES.DYNAMIC] = true
+    [LIGHT_TYPES.DYNAMIC] = true,
+    [LIGHT_TYPES.DIRECTIONAL] = true
 }
 
 -- Caches
@@ -110,6 +112,11 @@ function ENT:Initialize()
         -- Dynamic lights
         for _, light in ipairs(NikNaks.CurrentMap:FindByClass("light_dynamic")) do
             light.lightType = LIGHT_TYPES.DYNAMIC
+            table.insert(self.regularLights, light)
+        end
+
+        for _, light in ipairs(NikNaks.CurrentMap:FindByClass("light_directional")) do
+            light.lightType = LIGHT_TYPES.DIRECTIONAL
             table.insert(self.regularLights, light)
         end
         
