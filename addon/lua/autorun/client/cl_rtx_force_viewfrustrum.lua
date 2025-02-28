@@ -203,7 +203,13 @@ local function AddToRTXCache(ent)
         local rtxBoundsSize = Vector(rtxDistance, rtxDistance, rtxDistance)
         ent:SetRenderBounds(-rtxBoundsSize, rtxBoundsSize)
         ent:DisableMatrix("RenderMultiply")
-        ent:SetNoDraw(false)
+        if GetConVar("rtx_lightupdater_show"):GetBool() then
+            ent:SetRenderMode(0)  
+            ent:SetColor(Color(255, 255, 255, 255))
+        else
+            ent:SetRenderMode(2)
+            ent:SetColor(Color(255, 255, 255, 1))
+        end
         
         -- Special handling for hdri_cube_editor to ensure it's never culled
         if ent:GetClass() == "hdri_cube_editor" then
