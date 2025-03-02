@@ -44,6 +44,7 @@ local patternCache = {}
 local weakEntityTable = {__mode = "k"} -- Allows garbage collection of invalid entities
 originalBounds = setmetatable({}, weakEntityTable)
 rtxUpdaterCache = setmetatable({}, weakEntityTable)
+local managedTimers = {}
 
 -- RTX Light Updater model list
 local RTX_UPDATER_MODELS = {
@@ -118,6 +119,17 @@ local SPECIAL_ENTITY_BOUNDS = {
 }
 
 -- Helper Functions
+
+local function CreateManagedTimer(name, delay, repetitions, func)
+    -- Remove existing timer if it exists
+    if timer.Exists(name) then
+        timer.Remove(name)
+    end
+    
+    -- Create new timer
+    timer.Create(name, delay, repetitions, func)
+    managedTimers[name] = true
+end
 
 local function CleanupInvalidEntities()
     local removed = 0
@@ -531,11 +543,7 @@ cvars.AddChangeCallback("fr_enabled", function(_, _, new)
 end)
 
 cvars.AddChangeCallback("fr_bounds_size", function(_, _, new)
-    if timer.Exists(boundsUpdateTimer) then
-        timer.Remove(boundsUpdateTimer)
-    end
-    
-    timer.Create(boundsUpdateTimer, DEBOUNCE_TIME, 1, function()
+    CreateManagedTimer(boundsUpdateTimer, DEBOUNCE_TIME, 1, function()
         UpdateBoundsVectors(tonumber(new))
         
         if cv_enabled:GetBool() then
@@ -549,11 +557,7 @@ end)
 cvars.AddChangeCallback("fr_rtx_distance", function(_, _, new)
     if not cv_enabled:GetBool() then return end
     
-    if timer.Exists(rtxUpdateTimer) then
-        timer.Remove(rtxUpdateTimer)
-    end
-    
-    timer.Create(rtxUpdateTimer, DEBOUNCE_TIME, 1, function()
+    CreateManagedTimer(boundsUpdateTimer, DEBOUNCE_TIME, 1, function()
         local rtxDistance = tonumber(new)
         local rtxBoundsSize = Vector(rtxDistance, rtxDistance, rtxDistance)
         
@@ -575,11 +579,7 @@ end)
 cvars.AddChangeCallback("fr_environment_light_distance", function(_, _, new)
     if not cv_enabled:GetBool() then return end
     
-    if timer.Exists("fr_environment_update") then
-        timer.Remove("fr_environment_update")
-    end
-    
-    timer.Create("fr_environment_update", DEBOUNCE_TIME, 1, function()
+    CreateManagedTimer(boundsUpdateTimer, DEBOUNCE_TIME, 1, function()
         local envDistance = tonumber(new)
         local envBoundsSize = Vector(envDistance, envDistance, envDistance)
         
