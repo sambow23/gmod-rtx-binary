@@ -41,6 +41,9 @@ local mapBounds = {
 }
 local boundsInitialized = false
 local patternCache = {}
+local weakEntityTable = {__mode = "k"} -- Allows garbage collection of invalid entities
+originalBounds = setmetatable({}, weakEntityTable)
+rtxUpdaterCache = setmetatable({}, weakEntityTable)
 
 -- RTX Light Updater model list
 local RTX_UPDATER_MODELS = {
@@ -113,6 +116,29 @@ local SPECIAL_ENTITY_BOUNDS = {
     -- Add more entities here as needed:
     -- ["entity_class"] = { size = number, description = "description" }
 }
+
+-- Helper Functions
+
+local function CleanupInvalidEntities()
+    local removed = 0
+    for ent in pairs(originalBounds) do
+        if not IsValid(ent) then
+            originalBounds[ent] = nil
+            removed = removed + 1
+        end
+    end
+    
+    for ent in pairs(rtxUpdaterCache) do
+        if not IsValid(ent) then
+            RemoveFromRTXCache(ent)
+            removed = removed + 1
+        end
+    end
+    
+    if cv_debug:GetBool() and removed > 0 then
+        print("[RTX Fixes] Cleaned up " .. removed .. " invalid entity references")
+    end
+end
 
 local function IsPointWithinBounds(point)
     return point:WithinAABox(mapBounds.min, mapBounds.max)
@@ -330,49 +356,107 @@ elseif ent:GetClass() == "hdri_cube_editor" then
     end
 end
 
-local function BatchUpdateEntities(entities)
-    -- Call our native implementation
-    EntityManager.BatchUpdateEntityBounds(entities, mins, maxs)
+local function UpdateAllEntitiesBatched(useOriginal)
+    local allEntities = ents.GetAll()
+    local totalEntities = #allEntities
+    local batchSize = 100
+    local batches = math.ceil(totalEntities / batchSize)
+    
+    local function ProcessEntityBatch(batchNum)
+        local startIdx = (batchNum - 1) * batchSize + 1
+        local endIdx = math.min(batchNum * batchSize, totalEntities)
+        
+        local batchEntities = {}
+        for i = startIdx, endIdx do
+            local ent = allEntities[i]
+            if IsValid(ent) then
+                SetEntityBounds(ent, useOriginal)
+            end
+        end
+        
+        -- Process next batch if more remain
+        if batchNum < batches then
+            timer.Simple(0.05, function()
+                ProcessEntityBatch(batchNum + 1)
+            end)
+        end
+    end
+    
+    -- Start batch processing
+    ProcessEntityBatch(1)
 end
 
 -- Create clientside static props
 local function CreateStaticProps()
-    -- Clear existing props
+    -- Clean up existing props first
     for _, prop in pairs(staticProps) do
         if IsValid(prop) then prop:Remove() end
     end
     staticProps = {}
-
-    if not (cv_enabled:GetBool() and NikNaks and NikNaks.CurrentMap) then return end
-
-    -- Disable engine props before creating our own
-    RunConsoleCommand("r_drawstaticprops", "1")
-
+    
+    -- Store original ConVar value
+    local originalPropSetting = GetConVar("r_drawstaticprops"):GetInt()
+    
+    if not (cv_enabled:GetBool() and NikNaks and NikNaks.CurrentMap) then 
+        return 
+    end
+    
+    -- Create props in batches to prevent frame drops
     local props = NikNaks.CurrentMap:GetStaticProps()
-
-    local maxDistance = 16384
-    local maxDistSqr = maxDistance * maxDistance
-    local playerPos = LocalPlayer():GetPos()
-
-    for _, propData in pairs(props) do
-        local propPos = propData:GetPos()
-        if RTXMath_DistToSqr(propPos, playerPos) <= maxDistSqr then
-            local prop = ClientsideModel(propData:GetModel())
-            if IsValid(prop) then
-                prop:SetPos(propPos)
-                prop:SetAngles(propData:GetAngles())
-                prop:SetRenderBounds(mins, maxs)
-                prop:SetColor(propData:GetColor())
-                prop:SetSkin(propData:GetSkin())
-                local scale = propData:GetScale()
-                if scale != 1 then
-                    prop:SetModelScale(scale)
+    local batchSize = 50
+    local propCount = 0
+    local totalProps = #props
+    local batches = math.ceil(totalProps / batchSize)
+    
+    local function ProcessBatch(batchNum)
+        local startIndex = (batchNum - 1) * batchSize + 1
+        local endIndex = math.min(batchNum * batchSize, totalProps)
+        
+        local playerPos = LocalPlayer():GetPos()
+        local maxDistance = 16384
+        local maxDistSqr = maxDistance * maxDistance
+        
+        for i = startIndex, endIndex do
+            local propData = props[i]
+            if propData then
+                local propPos = propData:GetPos()
+                if RTXMath_DistToSqr(propPos, playerPos) <= maxDistSqr then
+                    -- Stagger individual prop creation to further reduce stuttering
+                    timer.Simple((i - startIndex) * 0.01, function()
+                        local prop = ClientsideModel(propData:GetModel())
+                        if IsValid(prop) then
+                            prop:SetPos(propPos)
+                            prop:SetAngles(propData:GetAngles())
+                            prop:SetRenderBounds(mins, maxs)
+                            prop:SetColor(propData:GetColor())
+                            prop:SetSkin(propData:GetSkin())
+                            local scale = propData:GetScale()
+                            if scale != 1 then
+                                prop:SetModelScale(scale)
+                            end
+                            table.insert(staticProps, prop)
+                            propCount = propCount + 1
+                        end
+                    end)
                 end
-                prop:SetPredictable(false)
-                table.insert(staticProps, prop)
+            end
+        end
+        
+        -- Process next batch if there are more
+        if batchNum < batches then
+            timer.Simple(0.5, function() ProcessBatch(batchNum + 1) end)
+        else
+            if cv_debug:GetBool() then
+                print("[RTX Fixes] Created " .. propCount .. " static props")
             end
         end
     end
+    
+    -- Start batch processing
+    ProcessBatch(1)
+    
+    -- Save original setting in a global to restore later
+    RTX_FRUSTUM_ORIGINAL_PROP_SETTING = originalPropSetting
 end
 
 -- Update all entities
@@ -397,7 +481,7 @@ end)
 hook.Add("InitPostEntity", "InitialBoundsSetup", function()
     timer.Simple(1, function()
         if cv_enabled:GetBool() then
-            UpdateAllEntities(false)
+            UpdateAllEntitiesBatched(false)
             CreateStaticProps()
         end
     end)
@@ -427,13 +511,13 @@ cvars.AddChangeCallback("fr_enabled", function(_, _, new)
     local enabled = tobool(new)
     
     if enabled then
-        UpdateAllEntities(false)
+        UpdateAllEntitiesBatched(false)
         CreateStaticProps()
         
         -- Disable engine static props when enabled
         RunConsoleCommand("r_drawstaticprops", "1")
     else
-        UpdateAllEntities(true)
+        UpdateAllEntitiesBatched(true)
         -- Remove static props
         for _, prop in pairs(staticProps) do
             if IsValid(prop) then
@@ -455,7 +539,7 @@ cvars.AddChangeCallback("fr_bounds_size", function(_, _, new)
         UpdateBoundsVectors(tonumber(new))
         
         if cv_enabled:GetBool() then
-            UpdateAllEntities(false)
+            UpdateAllEntitiesBatched(false)
             CreateStaticProps()
         end
     end)
@@ -523,10 +607,10 @@ concommand.Add("fr_refresh", function()
         mins = Vector(-boundsSize, -boundsSize, -boundsSize)
         maxs = Vector(boundsSize, boundsSize, boundsSize)
         
-        UpdateAllEntities(false)
+        UpdateAllEntitiesBatched(false)
         CreateStaticProps()
     else
-        UpdateAllEntities(true)
+        UpdateAllEntitiesBatched(true)
     end
     
     print("Refreshed render bounds for all entities" .. (cv_enabled:GetBool() and " with large bounds" or " with original bounds"))
@@ -537,6 +621,9 @@ hook.Add("EntityRemoved", "CleanupRTXCache", function(ent)
     RemoveFromRTXCache(ent)
     originalBounds[ent] = nil
 end)
+
+-- Cleanup Timer
+timer.Create("FR_EntityCleanup", 60, 0, CleanupInvalidEntities)
 
 -- Debug command
 concommand.Add("fr_debug", function()
