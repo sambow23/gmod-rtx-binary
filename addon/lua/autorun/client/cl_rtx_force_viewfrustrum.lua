@@ -8,6 +8,11 @@ local cv_environment_light_distance = CreateClientConVar("fr_environment_light_d
 local cv_debug = CreateClientConVar("fr_debug_messages", "0", true, false, "Enable debug messages for RTX view frustum optimization")
 local cv_show_advanced = CreateClientConVar("fr_show_advanced", "0", true, false, "Show advanced RTX view frustum settings")
 
+-- Spatial optimization ConVars
+local cv_spatial_enabled = CreateClientConVar("fr_spatial_enabled", "1", true, false, "Enable spatial partitioning for performance")
+local cv_spatial_update_radius = CreateClientConVar("fr_spatial_radius", "8192", true, false, "Distance around player to update entities")
+local cv_spatial_update_interval = CreateClientConVar("fr_spatial_update_interval", "0.5", true, false, "How often to update entities (seconds)")
+
 -- Cache the bounds vectors
 local boundsSize = cv_bounds_size:GetFloat()
 local mins = Vector(-boundsSize, -boundsSize, -boundsSize)
@@ -22,6 +27,13 @@ local RTXMath_ComputeNormal = RTXMath.ComputeNormal
 local RTXMath_CreateVector = RTXMath.CreateVector
 local RTXMath_NegateVector = RTXMath.NegateVector
 local RTXMath_MultiplyVector = RTXMath.MultiplyVector
+
+-- Spatial update timer
+local spatialUpdateTimer = "FR_SpatialUpdate"
+
+-- Entity tracking for spatial updates
+local lastPlayerPos = Vector(0, 0, 0)
+local lastUpdateTime = 0
 
 -- Constants and caches
 local Vector = Vector
@@ -118,7 +130,87 @@ local SPECIAL_ENTITY_BOUNDS = {
     -- ["entity_class"] = { size = number, description = "description" }
 }
 
+timer.Simple(1, function()
+    if EntityManager and EntityManager.InitSpatialGrid then
+        print("[RTX Frustum] Explicitly initializing spatial grid...")
+        local success = EntityManager.InitSpatialGrid(1024)
+        print("[RTX Frustum] Spatial grid initialization " .. (success and "succeeded" or "failed"))
+    else
+        print("[RTX Frustum] ERROR: EntityManager or InitSpatialGrid function not available!")
+    end
+end)
+
 -- Helper Functions
+local function InitializeSpatialGrid()
+    if not cv_spatial_enabled:GetBool() then return end
+    
+    if cv_debug:GetBool() then
+        print("[RTX Frustum] Registering entities in spatial grid...")
+    end
+    
+    -- Make sure grid is initialized
+    if EntityManager.InitSpatialGrid then
+        EntityManager.InitSpatialGrid(1024)
+    end
+    
+    -- Register all entities in batches to prevent frame drops
+    local allEntities = ents.GetAll()
+    local batchSize = 100
+    local totalEntities = #allEntities
+    local batches = math.ceil(totalEntities / batchSize)
+    
+    local function RegisterBatch(batchNum)
+        local startIdx = (batchNum - 1) * batchSize + 1
+        local endIdx = math.min(batchNum * batchSize, totalEntities)
+        
+        for i = startIdx, endIdx do
+            local ent = allEntities[i]
+            if IsValid(ent) then
+                EntityManager.RegisterEntityInGrid(ent)
+            end
+        end
+        
+        -- Process next batch if more remain
+        if batchNum < batches then
+            timer.Simple(0.05, function()
+                RegisterBatch(batchNum + 1)
+            end)
+        elseif cv_debug:GetBool() then
+            local total, cells = EntityManager.GetSpatialStats()
+            print(string.format("[RTX Frustum] Spatial grid populated with %d entities in %d cells", total, cells))
+        end
+    end
+    
+    -- Start batch processing
+    RegisterBatch(1)
+end
+
+local function UpdateEntitiesAroundPlayer()
+    if not (cv_enabled:GetBool() and cv_spatial_enabled:GetBool()) then return end
+    
+    local player = LocalPlayer()
+    if not IsValid(player) then return end
+    
+    local playerPos = player:GetPos()
+    local radius = cv_spatial_update_radius:GetFloat()
+    
+    -- Only update if player moved significantly or enough time passed
+    local timeSinceLastUpdate = CurTime() - lastUpdateTime
+    local playerMoved = playerPos:DistToSqr(lastPlayerPos) > 10000 -- ~100 units
+    
+    if playerMoved or timeSinceLastUpdate >= cv_spatial_update_interval:GetFloat() then
+        -- Update entities in the area around the player
+        EntityManager.BatchProcessEntitiesInArea(playerPos, radius, false)
+        
+        -- Update tracking variables
+        lastPlayerPos = playerPos
+        lastUpdateTime = CurTime()
+        
+        if cv_debug:GetBool() then
+            print(string.format("[RTX Frustum] Updated entities within %d units of player", radius))
+        end
+    end
+end
 
 local function CreateManagedTimer(name, delay, repetitions, func)
     -- Remove existing timer if it exists
@@ -369,33 +461,87 @@ elseif ent:GetClass() == "hdri_cube_editor" then
 end
 
 local function UpdateAllEntitiesBatched(useOriginal)
-    local allEntities = ents.GetAll()
-    local totalEntities = #allEntities
-    local batchSize = 100
-    local batches = math.ceil(totalEntities / batchSize)
-    
-    local function ProcessEntityBatch(batchNum)
-        local startIdx = (batchNum - 1) * batchSize + 1
-        local endIdx = math.min(batchNum * batchSize, totalEntities)
+    -- If spatial is disabled, process all entities the original way
+    if not cv_spatial_enabled:GetBool() then
+        local allEntities = ents.GetAll()
+        local totalEntities = #allEntities
+        local batchSize = 100
+        local batches = math.ceil(totalEntities / batchSize)
         
-        local batchEntities = {}
-        for i = startIdx, endIdx do
-            local ent = allEntities[i]
-            if IsValid(ent) then
-                SetEntityBounds(ent, useOriginal)
+        local function ProcessEntityBatch(batchNum)
+            local startIdx = (batchNum - 1) * batchSize + 1
+            local endIdx = math.min(batchNum * batchSize, totalEntities)
+            
+            for i = startIdx, endIdx do
+                local ent = allEntities[i]
+                if IsValid(ent) then
+                    SetEntityBounds(ent, useOriginal)
+                end
+            end
+            
+            -- Process next batch if more remain
+            if batchNum < batches then
+                timer.Simple(0.05, function()
+                    ProcessEntityBatch(batchNum + 1)
+                end)
             end
         end
         
-        -- Process next batch if more remain
-        if batchNum < batches then
-            timer.Simple(0.05, function()
-                ProcessEntityBatch(batchNum + 1)
-            end)
+        -- Start batch processing
+        ProcessEntityBatch(1)
+    else
+        -- Use spatial optimization - only process entities around player
+        local player = LocalPlayer()
+        if not IsValid(player) then return end
+        
+        local playerPos = player:GetPos()
+        local radius = cv_spatial_update_radius:GetFloat()
+        
+        -- Get entities around player using native spatial query
+        local mins = Vector(playerPos.x - radius, playerPos.y - radius, playerPos.z - radius)
+        local maxs = Vector(playerPos.x + radius, playerPos.y + radius, playerPos.z + radius)
+        local nearbyEntities = EntityManager.QueryEntitiesInRegion(mins, maxs)
+        
+        -- Process these entities in batches
+        local totalEntities = #nearbyEntities
+        local batchSize = 100
+        local batches = math.ceil(totalEntities / batchSize)
+        
+        local function ProcessSpatialBatch(batchNum)
+            local startIdx = (batchNum - 1) * batchSize + 1
+            local endIdx = math.min(batchNum * batchSize, totalEntities)
+            
+            for i = startIdx, endIdx do
+                local ent = nearbyEntities[i]
+                if IsValid(ent) then
+                    SetEntityBounds(ent, useOriginal)
+                end
+            end
+            
+            -- Process next batch if more remain
+            if batchNum < batches then
+                timer.Simple(0.05, function()
+                    ProcessSpatialBatch(batchNum + 1)
+                end)
+            elseif cv_debug:GetBool() then
+                print(string.format("[RTX Frustum] Processed %d entities near player (radius: %.0f)", 
+                    totalEntities, radius))
+            end
+        end
+        
+        -- Option 1: Process in batches
+        if totalEntities > batchSize then
+            ProcessSpatialBatch(1)
+        else
+            -- Option 2: Use optimized C++ batch function for smaller sets
+            EntityManager.BatchProcessEntitiesInArea(playerPos, radius, useOriginal)
+            
+            if cv_debug:GetBool() then
+                print(string.format("[RTX Frustum] Used native batch process for %d entities (radius: %.0f)", 
+                    totalEntities, radius))
+            end
         end
     end
-    
-    -- Start batch processing
-    ProcessEntityBatch(1)
 end
 
 -- Create clientside static props
@@ -477,6 +623,81 @@ local function UpdateAllEntities(useOriginal)
         SetEntityBounds(ent, useOriginal)
     end
 end
+
+
+hook.Add("InitPostEntity", "FR_InitSpatialGrid", function()
+    -- Initialize spatial grid
+    timer.Simple(1, function()
+        if cv_spatial_enabled:GetBool() then
+            InitializeSpatialGrid()
+            
+            -- Start spatial update timer
+            if timer.Exists(spatialUpdateTimer) then
+                timer.Remove(spatialUpdateTimer)
+            end
+            
+            timer.Create(spatialUpdateTimer, cv_spatial_update_interval:GetFloat(), 0, UpdateEntitiesAroundPlayer)
+        end
+        
+        if cv_enabled:GetBool() then
+            UpdateAllEntities(false)
+            CreateStaticProps()
+        end
+    end)
+end)
+
+-- Handle ConVar changes
+cvars.AddChangeCallback("fr_spatial_enabled", function(_, _, new)
+    local enabled = tobool(new)
+    
+    if enabled then
+        -- Initialize spatial grid
+        InitializeSpatialGrid()
+        
+        -- Start spatial update timer
+        if timer.Exists(spatialUpdateTimer) then
+            timer.Remove(spatialUpdateTimer)
+        end
+        
+        timer.Create(spatialUpdateTimer, cv_spatial_update_interval:GetFloat(), 0, UpdateEntitiesAroundPlayer)
+    else
+        -- Remove spatial update timer
+        if timer.Exists(spatialUpdateTimer) then
+            timer.Remove(spatialUpdateTimer)
+        end
+    end
+end)
+
+cvars.AddChangeCallback("fr_spatial_update_interval", function(_, _, new)
+    if not cv_spatial_enabled:GetBool() then return end
+    
+    local interval = tonumber(new)
+    
+    -- Update timer
+    if timer.Exists(spatialUpdateTimer) then
+        timer.Remove(spatialUpdateTimer)
+    end
+    
+    timer.Create(spatialUpdateTimer, interval, 0, UpdateEntitiesAroundPlayer)
+end)
+
+hook.Add("OnEntityCreated", "FR_SpatialGridRegister", function(ent)
+    if not IsValid(ent) or not cv_spatial_enabled:GetBool() then return end
+    
+    timer.Simple(0, function()
+        if IsValid(ent) and cv_spatial_enabled:GetBool() then
+            EntityManager.RegisterEntityInGrid(ent)
+            SetEntityBounds(ent, not cv_enabled:GetBool())
+        end
+    end)
+end)
+
+-- Remove entities from spatial grid when deleted
+hook.Add("EntityRemoved", "FR_SpatialGridRemove", function(ent)
+    if cv_spatial_enabled:GetBool() and IsValid(ent) then
+        EntityManager.RemoveEntityFromGrid(ent)
+    end
+end)
 
 -- Hook for new entities
 hook.Add("OnEntityCreated", "SetLargeRenderBounds", function(ent)
@@ -635,6 +856,17 @@ concommand.Add("fr_debug", function()
     print("Stored Original Bounds:", table.Count(originalBounds))
     print("RTX Updaters (Cached):", rtxUpdaterCount)
     
+    -- Spatial optimization stats
+    print("\nSpatial Optimization:")
+    print("Enabled:", cv_spatial_enabled:GetBool())
+    print("Update Radius:", cv_spatial_update_radius:GetFloat())
+    print("Update Interval:", cv_spatial_update_interval:GetFloat())
+    
+    if cv_spatial_enabled:GetBool() then
+        local total, cells = EntityManager.GetSpatialStats()
+        print(string.format("Spatial Grid: %d entities in %d cells", total, cells))
+    end
+    
     -- Special entities debug info
     print("\nSpecial Entity Classes:")
     for class, data in pairs(SPECIAL_ENTITY_BOUNDS) do
@@ -644,6 +876,7 @@ concommand.Add("fr_debug", function()
             data.description))
     end
 end)
+
 
 local function CreateSettingsPanel(panel)
     -- Clear the panel first
@@ -717,6 +950,39 @@ local function CreateSettingsPanel(panel)
     panel:Help("\nDebug Settings")
     panel:CheckBox("Show Debug Messages", "fr_debug_messages")
     panel:ControlHelp("Show detailed debug messages in console")
+
+    -- Add spatial optimization settings
+    panel:Help("\nPerformance Optimization")
+    panel:CheckBox("Enable Spatial Optimization", "fr_spatial_enabled")
+    panel:ControlHelp("Dramatically improves performance by only updating entities near the player")
+    
+    local spatialPanel = vgui.Create("DPanel", panel)
+    spatialPanel:Dock(TOP)
+    spatialPanel:DockMargin(8, 8, 8, 8)
+    spatialPanel:SetPaintBackground(false)
+    spatialPanel:SetVisible(cv_spatial_enabled:GetBool())
+    spatialPanel:SetTall(100)
+    
+    local spatialContent = vgui.Create("DScrollPanel", spatialPanel)
+    spatialContent:Dock(FILL)
+    
+    local spatialGroup = vgui.Create("DForm", spatialContent)
+    spatialGroup:Dock(TOP)
+    spatialGroup:DockMargin(0, 0, 0, 5)
+    spatialGroup:SetName("Spatial Settings")
+    
+    local radiusSlider = spatialGroup:NumSlider("Update Radius", "fr_spatial_radius", 1024, 32768, 0)
+    radiusSlider:SetTooltip("Distance around player to update entities")
+    
+    local intervalSlider = spatialGroup:NumSlider("Update Interval", "fr_spatial_update_interval", 0.1, 2.0, 1)
+    intervalSlider:SetTooltip("How often to update entities (seconds)")
+    
+    -- Update spatial panel visibility when the ConVar changes
+    cvars.AddChangeCallback("fr_spatial_enabled", function(_, _, new)
+        if IsValid(spatialPanel) then
+            spatialPanel:SetVisible(tobool(new))
+        end
+    end)
     
     -- Update advanced panel visibility when the ConVar changes
     cvars.AddChangeCallback("fr_show_advanced", function(_, _, new)
@@ -750,4 +1016,21 @@ concommand.Add("fr_add_special_entity", function(ply, cmd, args)
     
     AddSpecialEntityBounds(class, size, description)
     print(string.format("Added special entity bounds for %s: %d units", class, size))
+end)
+
+concommand.Add("fr_check_module", function()
+    print("\n[RTX Fixes] Module Check:")
+    print("EntityManager available:", EntityManager ~= nil)
+    if EntityManager then
+        for name, func in pairs(EntityManager) do
+            print("  -", name, ":", type(func))
+        end
+    end
+    
+    if EntityManager and EntityManager.GetSpatialStats then
+        local total, cells = EntityManager.GetSpatialStats()
+        print("Spatial Stats: ", total, "entities in", cells, "cells")
+    else
+        print("GetSpatialStats not available")
+    end
 end)

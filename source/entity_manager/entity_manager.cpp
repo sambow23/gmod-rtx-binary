@@ -13,6 +13,8 @@ namespace EntityManager {
 std::vector<Light> cachedLights;
 std::random_device rd;
 std::mt19937 rng(rd());
+std::unordered_map<int, int> g_EntityRefs;
+SpatialPartitioning::SpatialHashGrid* g_SpatialGrid = nullptr;
 
 // Helper function to parse color string "r g b a"
 Vector ParseColorString(const char* colorStr) {
@@ -687,8 +689,201 @@ LUA_FUNCTION(GetRandomLights_Native) {
     return 1;
 }
 
+LUA_FUNCTION(RegisterEntityInGrid_Native) {
+    if (!g_SpatialGrid) {
+        Msg("[RTX Fixes] Warning: Spatial grid not initialized\n");
+        return 0;
+    }
+    
+    LUA->CheckType(1, Type::Entity);
+    
+    // Get entity position
+    LUA->GetField(1, "GetPos");
+    LUA->Push(1);
+    LUA->Call(1, 1);
+    Vector* pos = LUA->GetUserType<Vector>(-1, Type::Vector);
+    
+    // Get entity index for stable identification
+    LUA->GetField(1, "EntIndex");
+    LUA->Push(1);
+    LUA->Call(1, 1);
+    int entIndex = LUA->GetNumber(-1);
+    LUA->Pop(); // Pop result
+    
+    // Create a persistent reference and store it
+    int entityRef = LUA->ReferenceCreate();
+    
+    // Store the reference for later cleanup
+    g_EntityRefs[entIndex] = entityRef;
+    
+    // Register in grid with the entity index as the key
+    g_SpatialGrid->Insert(reinterpret_cast<void*>(static_cast<intptr_t>(entIndex)), *pos);
+    
+    LUA->Pop(); // Pop position vector
+    Msg("[RTX Fixes] Registered entity %d in spatial grid\n", entIndex);
+    return 0;
+}
+
+LUA_FUNCTION(UpdateEntityInGrid_Native) {
+    if (!g_SpatialGrid) return 0;
+    
+    LUA->CheckType(1, Type::Entity);
+    LUA->CheckType(2, Type::Vector); // old position
+    LUA->CheckType(3, Type::Vector); // new position
+    
+    int entityRef = LUA->ReferenceCreate();
+    Vector* oldPos = LUA->GetUserType<Vector>(2, Type::Vector);
+    Vector* newPos = LUA->GetUserType<Vector>(3, Type::Vector);
+    
+    g_SpatialGrid->Update(reinterpret_cast<void*>(static_cast<intptr_t>(entityRef)), *oldPos, *newPos);
+    
+    // Free the reference after use
+    LUA->ReferenceFree(entityRef);
+    
+    return 0;
+}
+
+LUA_FUNCTION(RemoveEntityFromGrid_Native) {
+    if (!g_SpatialGrid) return 0;
+    
+    LUA->CheckType(1, Type::Entity);
+    
+    // Get entity position
+    LUA->GetField(1, "GetPos");
+    LUA->Push(1);
+    LUA->Call(1, 1);
+    Vector* pos = LUA->GetUserType<Vector>(-1, Type::Vector);
+    
+    // Get a reference to the entity
+    int entityRef = LUA->ReferenceCreate(); // Create reference and get ID
+    
+    // Use the reference ID as our key (converted to void* for storage)
+    g_SpatialGrid->Remove(reinterpret_cast<void*>(static_cast<intptr_t>(entityRef)), *pos);
+    
+    // Free the reference we just created
+    LUA->ReferenceFree(entityRef);
+    
+    LUA->Pop(); // Pop position vector
+    return 0;
+}
+
+LUA_FUNCTION(QueryEntitiesInRegion_Native) {
+    if (!g_SpatialGrid) {
+        LUA->CreateTable();
+        return 1;
+    }
+    
+    LUA->CheckType(1, Type::Vector); // mins
+    LUA->CheckType(2, Type::Vector); // maxs
+    
+    Vector* mins = LUA->GetUserType<Vector>(1, Type::Vector);
+    Vector* maxs = LUA->GetUserType<Vector>(2, Type::Vector);
+    
+    std::vector<void*> entities = g_SpatialGrid->Query(*mins, *maxs);
+    
+    // Create return table
+    LUA->CreateTable();
+    int tableIndex = LUA->Top();
+    int resultIndex = 1;
+    
+    for (void* entityPtr : entities) {
+        // Convert void* back to entity index
+        int entIndex = static_cast<int>(reinterpret_cast<intptr_t>(entityPtr));
+        
+        // Find the reference for this entity index
+        auto it = g_EntityRefs.find(entIndex);
+        if (it != g_EntityRefs.end()) {
+            LUA->PushNumber(resultIndex++);
+            LUA->ReferencePush(it->second); // Push entity by reference
+            LUA->SetTable(tableIndex);
+        }
+    }
+    
+    return 1;
+}
+
+LUA_FUNCTION(GetSpatialStats_Native) {
+    if (!g_SpatialGrid) {
+        LUA->PushNumber(0); // Total entities
+        LUA->PushNumber(0); // Cell count
+        return 2;
+    }
+    
+    LUA->PushNumber(g_SpatialGrid->GetTotalEntities());
+    LUA->PushNumber(g_SpatialGrid->GetCellCount());
+    return 2;
+}
+
+
+void BatchProcessEntitiesInArea(GarrysMod::Lua::ILuaBase* LUA, const Vector& playerPos, float radius, bool useOriginal) {
+    if (!g_SpatialGrid) return;
+    
+    Vector mins(playerPos.x - radius, playerPos.y - radius, playerPos.z - radius);
+    Vector maxs(playerPos.x + radius, playerPos.y + radius, playerPos.z + radius);
+    
+    g_SpatialGrid->QueryCallback(mins, maxs, [LUA, useOriginal](void* entityRef) {
+        // Convert void* back to reference ID
+        int refID = static_cast<int>(reinterpret_cast<intptr_t>(entityRef));
+        
+        // Push entity to stack
+        LUA->ReferencePush(refID);
+        
+        // Make sure it's an entity
+        if (LUA->IsType(-1, GarrysMod::Lua::Type::Entity)) {
+            // Call Lua's SetEntityBounds function
+            LUA->GetField(GarrysMod::Lua::INDEX_GLOBAL, "SetEntityBounds");
+            
+            if (LUA->IsType(-1, GarrysMod::Lua::Type::Function)) {
+                LUA->Push(-2); // Push entity again
+                LUA->PushBool(useOriginal);
+                LUA->Call(2, 0); // Call SetEntityBounds(entity, useOriginal)
+            }
+            else {
+                LUA->Pop(); // Pop whatever was on top if not a function
+            }
+        }
+        
+        LUA->Pop(); // Pop the entity
+    });
+}
+
+LUA_FUNCTION(BatchProcessEntitiesInArea_Native) {
+    LUA->CheckType(1, Type::Vector); // playerPos
+    float radius = LUA->CheckNumber(2);
+    bool useOriginal = LUA->GetBool(3);
+    
+    Vector* playerPos = LUA->GetUserType<Vector>(1, Type::Vector);
+    BatchProcessEntitiesInArea(LUA, *playerPos, radius, useOriginal);
+    
+    return 0;
+}
+
+LUA_FUNCTION(InitSpatialGrid_Native) {
+    float cellSize = 1024.0f;
+    if (LUA->IsType(1, Type::NUMBER)) {
+        cellSize = LUA->GetNumber(1);
+    }
+    
+    if (g_SpatialGrid) {
+        delete g_SpatialGrid;
+        g_SpatialGrid = nullptr;
+        Msg("[RTX Fixes] Existing spatial grid deleted\n");
+    }
+    
+    g_SpatialGrid = new SpatialPartitioning::SpatialHashGrid(cellSize);
+    Msg("[RTX Fixes] Spatial grid explicitly initialized with cell size %.1f\n", cellSize);
+    
+    LUA->PushBool(true);
+    return 1;
+}
+
 void Initialize(ILuaBase* LUA) {
     LUA->CreateTable();
+
+    if (!g_SpatialGrid) {
+        g_SpatialGrid = new SpatialPartitioning::SpatialHashGrid(1024.0f);
+        Msg("[RTX Fixes] Spatial grid initialized with cell size 1024.0f\n");
+    }
 
     // Add existing functions
     LUA->PushCFunction(BatchUpdateEntityBounds_Native);
@@ -711,6 +906,27 @@ void Initialize(ILuaBase* LUA) {
 
     LUA->PushCFunction(ProcessRegionBatch_Native);
     LUA->SetField(-2, "ProcessRegionBatch");
+
+    LUA->PushCFunction(RegisterEntityInGrid_Native);
+    LUA->SetField(-2, "RegisterEntityInGrid");
+    
+    LUA->PushCFunction(UpdateEntityInGrid_Native);
+    LUA->SetField(-2, "UpdateEntityInGrid");
+    
+    LUA->PushCFunction(RemoveEntityFromGrid_Native);
+    LUA->SetField(-2, "RemoveEntityFromGrid");
+    
+    LUA->PushCFunction(QueryEntitiesInRegion_Native);
+    LUA->SetField(-2, "QueryEntitiesInRegion");
+    
+    LUA->PushCFunction(GetSpatialStats_Native);
+    LUA->SetField(-2, "GetSpatialStats");
+
+    LUA->PushCFunction(BatchProcessEntitiesInArea_Native);
+    LUA->SetField(-2, "BatchProcessEntitiesInArea");
+
+    LUA->PushCFunction(InitSpatialGrid_Native);
+    LUA->SetField(-2, "InitSpatialGrid");
 
     LUA->SetField(-2, "EntityManager");
 }

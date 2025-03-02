@@ -2,6 +2,7 @@
 #include "GarrysMod/Lua/Interface.h"
 #include "math/math.hpp"
 #include "mathlib/vector.h"
+#include "spatial_partitioning/spatial_partitioning.hpp"
 #include <unordered_map>
 #include <vector>
 #include <random>
@@ -106,6 +107,7 @@ namespace EntityManager {
     extern std::vector<Light> cachedLights;
     extern std::random_device rd;
     extern std::mt19937 rng;
+    extern SpatialPartitioning::SpatialHashGrid* g_SpatialGrid;
 
     // Helper functions
     void ShuffleLights();
@@ -128,4 +130,5 @@ namespace EntityManager {
 
     // Initialize entity manager
     void Initialize(GarrysMod::Lua::ILuaBase* LUA);
+    void BatchProcessEntitiesInArea(GarrysMod::Lua::ILuaBase* LUA, const Vector& playerPos, float radius, bool useOriginal);
 }
